@@ -5,6 +5,11 @@ use chrono::{Date, Datelike, Duration, LocalResult, TimeZone, Utc};
 /// contain inconsistent numbers of days, therefore a full 4 year period is required.
 pub(super) const MACRO_PERIOD: u32 = (365.25 * 4.0) as u32;
 
+// These are tedious arrays to aid the lookup of month lengths. Unfortunately the
+// `chrono` library does not give us a static approach for this.
+const MONTH_LENGTHS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const MONTH_LENGTHS_LEAP: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
 /// Records the recurrence of a transaction
 pub enum Frequency {
     Once,
@@ -68,7 +73,7 @@ impl Frequency {
                 let start_weekday = start.weekday().number_from_monday();
                 let max_day = *days.iter().max().expect("Frequency::Weekly days is empty");
                 let weekday_interval = if start_weekday > max_day {
-                    Duration::days(7)
+                    Duration::weeks(1)
                 } else {
                     interval
                 };
@@ -112,8 +117,108 @@ impl Frequency {
                 dates.sort_unstable();
                 dates
             }
+            Frequency::MonthlyDay(months, nth, ref day) => {
+                // Calculate the month integers for the period
+                let month_list = get_months_for_interval(months, start, end);
+
+                let mut dates = Vec::new();
+
+                // Loop over months and years to calculate all payment dates
+                for (m, y) in month_list.iter() {
+                    let date = Utc.ymd(*y, *m, 1);
+                    if let Some(d) = day.increment_to_day(date, nth) {
+                        dates.push(d);
+                    }
+                }
+
+                dates
+            }
             _ => unimplemented!(),
         }
+    }
+}
+
+impl FrequencyMonthDay {
+    fn get_day_of_week(&self) -> u32 {
+        match *self {
+            FrequencyMonthDay::Monday => 1,
+            FrequencyMonthDay::Tuesday => 2,
+            FrequencyMonthDay::Wednesday => 3,
+            FrequencyMonthDay::Thursday => 4,
+            FrequencyMonthDay::Friday => 5,
+            FrequencyMonthDay::Saturday => 6,
+            FrequencyMonthDay::Sunday => 7,
+
+            // There are no good defaults for these, so set them to something nonsensical
+            FrequencyMonthDay::Day => 0,
+            FrequencyMonthDay::Weekday => 0,
+            FrequencyMonthDay::Weekend => 0,
+        }
+    }
+
+    fn increment_to_day(&self, date: Date<Utc>, mut nth: u32) -> Option<Date<Utc>> {
+        let weekday = date.weekday().number_from_monday();
+
+        // Get length of month, accounting for leap years
+        let length = if date.year() % 4 == 0 {
+            MONTH_LENGTHS_LEAP[date.month0() as usize]
+        } else {
+            MONTH_LENGTHS[date.month0() as usize]
+        };
+
+        // The maximum length for 4 weeks is 28 days. If there is surplus, this means
+        // that some days can accommodate a 5th recursion, if they occur early enough
+        // in the month.
+        let max_nth = if self.get_day_of_week() <= length - 28 {
+            5
+        } else {
+            4
+        };
+
+        // Handle 'last' nth, which is represented by a 0
+        if nth == 0 {
+            nth = max_nth;
+        }
+        // Handle invalid nth (i.e. where nth places the day in the next month)
+        else if nth > max_nth {
+            return None;
+        }
+
+        // Subtract one as we are already on day/week 1
+        nth -= 1;
+
+        let week_interval = Duration::weeks((nth) as i64);
+        let day_interval = Duration::days((nth) as i64);
+
+        let d = match *self {
+            FrequencyMonthDay::Monday
+            | FrequencyMonthDay::Tuesday
+            | FrequencyMonthDay::Wednesday
+            | FrequencyMonthDay::Thursday
+            | FrequencyMonthDay::Friday
+            | FrequencyMonthDay::Saturday
+            | FrequencyMonthDay::Sunday => {
+                increment_to_weekday(date, self.get_day_of_week(), Duration::weeks(1))
+                    + week_interval
+            }
+            FrequencyMonthDay::Day => date + day_interval,
+            FrequencyMonthDay::Weekday => {
+                if weekday + nth < 6 {
+                    date + day_interval
+                } else {
+                    increment_to_weekday(date, 1, Duration::weeks(1)) + day_interval
+                }
+            }
+            FrequencyMonthDay::Weekend => {
+                if weekday >= 6 && weekday <= 7 {
+                    date + week_interval
+                } else {
+                    increment_to_weekday(date, 6, Duration::weeks(1)) + week_interval
+                }
+            }
+        };
+
+        Some(d)
     }
 }
 
@@ -287,6 +392,83 @@ mod tests {
             increment_to_weekday(date, 2, Duration::weeks(2)),
             Utc.ymd(2000, 4, 11)
         );
+    }
+
+    #[test]
+    fn increment_to_day_today() {
+        let frequency = FrequencyMonthDay::Saturday;
+        let date = Utc.ymd(2000, 4, 1);
+        assert_eq!(frequency.increment_to_day(date, 1), Some(date));
+    }
+
+    #[test]
+    fn increment_to_day_next_week() {
+        let frequency = FrequencyMonthDay::Monday;
+        let date = Utc.ymd(2000, 4, 1);
+        let new_date = Utc.ymd(2000, 4, 3);
+        assert_eq!(frequency.increment_to_day(date, 1), Some(new_date));
+    }
+
+    #[test]
+    fn increment_to_day_nth_week() {
+        let frequency = FrequencyMonthDay::Monday;
+        let date = Utc.ymd(2000, 4, 1);
+        let new_date = Utc.ymd(2000, 4, 17);
+        assert_eq!(frequency.increment_to_day(date, 3), Some(new_date));
+    }
+
+    #[test]
+    fn increment_to_day_day() {
+        let frequency = FrequencyMonthDay::Day;
+        let date = Utc.ymd(2000, 4, 1);
+        let new_date = Utc.ymd(2000, 4, 4);
+        assert_eq!(frequency.increment_to_day(date, 4), Some(new_date));
+    }
+
+    #[test]
+    fn increment_to_day_weekday_today() {
+        let frequency = FrequencyMonthDay::Weekday;
+        let date = Utc.ymd(2000, 5, 1);
+        assert_eq!(frequency.increment_to_day(date, 1), Some(date));
+    }
+
+    #[test]
+    fn increment_to_day_weekday_nth() {
+        let frequency = FrequencyMonthDay::Weekday;
+        let date = Utc.ymd(2000, 4, 1);
+        let new_date = Utc.ymd(2000, 4, 6);
+        assert_eq!(frequency.increment_to_day(date, 4), Some(new_date));
+    }
+
+    #[test]
+    fn increment_to_day_weekend_today() {
+        let frequency = FrequencyMonthDay::Weekend;
+        let date = Utc.ymd(2000, 4, 1);
+        assert_eq!(frequency.increment_to_day(date, 1), Some(date));
+    }
+
+    #[test]
+    fn increment_to_day_weekend_nth() {
+        let frequency = FrequencyMonthDay::Weekend;
+        let date = Utc.ymd(2000, 5, 1);
+        let new_date = Utc.ymd(2000, 5, 6);
+        assert_eq!(frequency.increment_to_day(date, 1), Some(new_date));
+    }
+
+    #[test]
+    fn increment_to_day_last_friday() {
+        // last week, invalid day (5th week)
+        let frequency = FrequencyMonthDay::Friday;
+        let date = Utc.ymd(2000, 4, 1);
+        let new_date = Utc.ymd(2000, 4, 28);
+        assert_eq!(frequency.increment_to_day(date, 0), Some(new_date));
+    }
+
+    #[test]
+    fn increment_to_day_invalid_date() {
+        let frequency = FrequencyMonthDay::Friday;
+        let date = Utc.ymd(2000, 4, 1);
+        assert_eq!(frequency.increment_to_day(date, 5), None);
     }
 
     #[test]
