@@ -50,10 +50,11 @@ impl Contribution {
 pub(super) fn calculate(
     value: CurrencyValue,
     frequency: Frequency,
-    start_date: Date<Utc>,
-    end_date: Option<Date<Utc>>,
+    mut start_date: Date<Utc>,
+    mut end_date: Option<Date<Utc>>,
+    mut contributions: Vec<Contribution>,
     now: Option<Date<Utc>>, // This allows overriding the current time for testing
-) -> Result<(Contribution, Option<Contribution>), ContributionError> {
+) -> Result<Vec<Contribution>, ContributionError> {
     let now = now.unwrap_or(Utc::today());
 
     // We don't allow contributions that start in the past
@@ -61,40 +62,40 @@ pub(super) fn calculate(
         return Err(ContributionError::HistoricalStartDate);
     }
 
-    if let Frequency::Once = frequency {
-        // Determine the difference between now and the start date
-        let duration = start_date - now;
-
-        // Calculate contribution amounts
-        let (regular, last) = calculate_for_duration(value, duration);
-
-        return Ok((
-            Contribution {
-                regular: regular.into(),
-                last: last.map(|l| l.into()),
-                start_date: now,
-                end_date: Some(start_date),
-            },
-            None,
-        ));
-    }
-
-    unimplemented!();
-
     // Get payment dates from `Frequency` for start and end dates
-    //
-    // IF there is an end date:
-    //      Set start date = now
-    //      Set end date = last payment date
-    //      Set period length = end date - start date <-- THIS WILL BE RECALCULATED ON THE FLY IN **ADJUST START DATE**
-    // ELSE:
-    //      Set period length = `Frequency::get_period_length()`
-    //
-    // Adjust start date (per "Contribution start date algorithm" in Notes)
-    //
-    // Calculate contribution for period length
-    //
-    // For amelioration:
+    let payments = frequency.get_payment_dates(start_date, end_date);
+
+    // Get period length
+    let length = if let Frequency::Once = frequency {
+        end_date = Some(start_date);
+        start_date = now;
+        *end_date.as_ref().unwrap() - start_date
+    } else if let Some(end) = end_date.as_mut() {
+        // Adjust start and end dates to maximise time available
+        start_date = now;
+        *end = *payments.last().unwrap();
+
+        let mut length = *end - start_date;
+
+        // @todo Adjust start date (per "Contribution start date algorithm" in Notes)
+
+        length
+    } else {
+        frequency.get_period_length()
+    };
+
+    // Calculate contribution amounts
+    let (regular, last) = calculate_for_duration(value, length);
+
+    // Add this `Contribution` to the chain
+    contributions.push(Contribution {
+        regular: regular.into(),
+        last: last.map(|l| l.into()),
+        start_date,
+        end_date,
+    });
+
+    // @todo For amelioration:
     // ---
     // IF there is an end date:
     //      Calculate period length from now => start date
@@ -102,6 +103,8 @@ pub(super) fn calculate(
     //      Calculate period length from original start date => start_date
     // Is period length > 0
     //      Loop over fn until start date - now == 0
+
+    Ok(contributions)
 
     // --------------------------------------
     // Thoughts:
@@ -221,6 +224,7 @@ mod tests {
             Frequency::Once,
             Utc.ymd(2000, 4, 1),
             None,
+            Vec::new(),
             Some(Utc.ymd(2000, 4, 2)),
         );
 
