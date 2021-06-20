@@ -126,7 +126,9 @@ impl Frequency {
                 // Loop over months and years to calculate all payment dates
                 for (m, y) in month_list.iter() {
                     if let Some(d) = day.get_date(*y, *m, nth) {
-                        dates.push(d);
+                        if d >= start && d <= end {
+                            dates.push(d);
+                        }
                     }
                 }
 
@@ -135,7 +137,7 @@ impl Frequency {
             Frequency::Yearly(years, ref months, nth, ref day) => {
                 let mut dates = Vec::new();
 
-                for year in start.year()..end.year() {
+                for year in start.year()..=end.year() {
                     // Only include years that match the recursion
                     // XXX This breaks on first year
                     if year % years as i32 == 0 {
@@ -147,7 +149,9 @@ impl Frequency {
                                     .as_ref()
                                     .expect("`day` was not set for Frequency::Yearly");
                                 if let Some(d) = day.get_date(year, *m, nth) {
-                                    dates.push(d);
+                                    if d >= start && d <= end {
+                                        dates.push(d);
+                                    }
                                 }
                             } else {
                                 // Make sure we don't try to instantiate an invalid date,
@@ -155,14 +159,16 @@ impl Frequency {
                                 if let LocalResult::Single(date) =
                                     Utc.ymd_opt(year, *m, start.day())
                                 {
-                                    dates.push(date);
+                                    if date >= start && date <= end {
+                                        dates.push(date);
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                unimplemented!();
+                dates
             }
         }
     }
@@ -258,7 +264,12 @@ impl FrequencyMonthDay {
                 // to get an offset that tells us how to find the final day, subtract by
                 // 29 instead, which is = to `weekday` for day 1.
                 let mut offset = length as i32 - 29;
-                let last_weekday = weekday as i32 + offset;
+                let mut last_weekday = weekday as i32 + offset;
+
+                // Adjust for week length
+                if last_weekday > 7 {
+                    last_weekday -= 7;
+                }
 
                 // Adjust for weekend
                 if last_weekday > 5 {
@@ -297,12 +308,19 @@ impl FrequencyMonthDay {
                 // to get an offset that tells us how to find the final day, subtract by
                 // 29 instead, which is = to `weekday` for day 1.
                 let mut offset = length as i32 - 29;
-                let last_weekday = weekday as i32 + offset;
+                let mut last_weekday = weekday as i32 + offset;
 
-                // Adjust for weekend
+                // Adjust for week length
+                if last_weekday > 7 {
+                    last_weekday -= 7;
+                }
+
+                // Adjust for weekdays
                 if last_weekday < 6 {
                     offset -= last_weekday;
                 }
+
+                println!("Offset: {}, Lask wkd: {}", offset, last_weekday);
 
                 date.with_day((29 + offset) as u32).unwrap()
             }
@@ -592,10 +610,24 @@ mod tests {
     }
 
     #[test]
+    fn get_date_last_weekday_jan() {
+        let frequency = FrequencyMonthDay::Weekday;
+        let new_date = Utc.ymd(2000, 1, 31);
+        assert_eq!(frequency.get_date(2000, 1, 0), Some(new_date));
+    }
+
+    #[test]
     fn get_date_last_weekday_feb() {
         let frequency = FrequencyMonthDay::Weekday;
         let new_date = Utc.ymd(2001, 2, 28);
         assert_eq!(frequency.get_date(2001, 2, 0), Some(new_date));
+    }
+
+    #[test]
+    fn get_date_last_weekday_oct() {
+        let frequency = FrequencyMonthDay::Weekday;
+        let new_date = Utc.ymd(2000, 10, 31);
+        assert_eq!(frequency.get_date(2000, 10, 0), Some(new_date));
     }
 
     #[test]
@@ -606,10 +638,24 @@ mod tests {
     }
 
     #[test]
+    fn get_date_last_weekend_jan() {
+        let frequency = FrequencyMonthDay::Weekend;
+        let new_date = Utc.ymd(2000, 1, 30);
+        assert_eq!(frequency.get_date(2000, 1, 0), Some(new_date));
+    }
+
+    #[test]
     fn get_date_last_weekend_may() {
         let frequency = FrequencyMonthDay::Weekend;
         let new_date = Utc.ymd(2000, 5, 28);
         assert_eq!(frequency.get_date(2000, 5, 0), Some(new_date));
+    }
+
+    #[test]
+    fn get_date_last_weekend_oct() {
+        let frequency = FrequencyMonthDay::Weekend;
+        let new_date = Utc.ymd(2000, 10, 29);
+        assert_eq!(frequency.get_date(2000, 10, 0), Some(new_date));
     }
 
     #[test]
@@ -748,9 +794,23 @@ mod tests {
         assert_eq!(frequency.get_payment_days(start, None), dates);
     }
 
-    // #[test]
-    // fn get_payment_days_yearly_nth_end_date() {
-    //     let frequency = Frequency::Yearly(2, vec![1, 2], Some(0), FrequencyMonthDay::Weekend)
+    #[test]
+    fn get_payment_days_yearly_nth_end_date() {
+        let frequency = Frequency::Yearly(2, vec![1, 2], Some(0), Some(FrequencyMonthDay::Weekend));
+        let start = Utc.ymd(2000, 1, 1);
+        let end = Utc.ymd(2008, 2, 1);
+        let dates = vec![
+            Utc.ymd(2000, 1, 30),
+            Utc.ymd(2000, 2, 27),
+            Utc.ymd(2002, 1, 27),
+            Utc.ymd(2002, 2, 24),
+            Utc.ymd(2004, 1, 31),
+            Utc.ymd(2004, 2, 29),
+            Utc.ymd(2006, 1, 29),
+            Utc.ymd(2006, 2, 26),
+            Utc.ymd(2008, 1, 27),
+        ];
 
-    // }
+        assert_eq!(frequency.get_payment_days(start, Some(end)), dates);
+    }
 }
