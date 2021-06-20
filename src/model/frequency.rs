@@ -125,15 +125,45 @@ impl Frequency {
 
                 // Loop over months and years to calculate all payment dates
                 for (m, y) in month_list.iter() {
-                    let date = Utc.ymd(*y, *m, 1);
-                    if let Some(d) = day.increment_to_day(date, nth) {
+                    if let Some(d) = day.get_date(*y, *m, nth) {
                         dates.push(d);
                     }
                 }
 
                 dates
             }
-            _ => unimplemented!(),
+            Frequency::Yearly(years, ref months, nth, ref day) => {
+                let mut dates = Vec::new();
+
+                for year in start.year()..end.year() {
+                    // Only include years that match the recursion
+                    // XXX This breaks on first year
+                    if year % years as i32 == 0 {
+                        for m in months {
+                            // 'nth day' recursion is optional. If the user hasn't
+                            // defined these params, use the start date's day.
+                            if let Some(nth) = nth {
+                                let day = day
+                                    .as_ref()
+                                    .expect("`day` was not set for Frequency::Yearly");
+                                if let Some(d) = day.get_date(year, *m, nth) {
+                                    dates.push(d);
+                                }
+                            } else {
+                                // Make sure we don't try to instantiate an invalid date,
+                                // e.g. "31 June".
+                                if let LocalResult::Single(date) =
+                                    Utc.ymd_opt(year, *m, start.day())
+                                {
+                                    dates.push(date);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                unimplemented!();
+            }
         }
     }
 }
@@ -156,8 +186,10 @@ impl FrequencyMonthDay {
         }
     }
 
-    fn increment_to_day(&self, date: Date<Utc>, mut nth: u32) -> Option<Date<Utc>> {
+    fn get_date(&self, year: i32, month: u32, mut nth: u32) -> Option<Date<Utc>> {
+        let date = Utc.ymd(year, month, 1);
         let weekday = date.weekday().number_from_monday();
+        let seek_last = nth == 0;
 
         // Get length of month, accounting for leap years
         let length = if date.year() % 4 == 0 {
@@ -176,7 +208,7 @@ impl FrequencyMonthDay {
         };
 
         // Handle 'last' nth, which is represented by a 0
-        if nth == 0 {
+        if seek_last {
             nth = max_nth;
         }
         // Handle invalid nth (i.e. where nth places the day in the next month)
@@ -185,10 +217,8 @@ impl FrequencyMonthDay {
         }
 
         // Subtract one as we are already on day/week 1
-        nth -= 1;
-
-        let week_interval = Duration::weeks((nth) as i64);
-        let day_interval = Duration::days((nth) as i64);
+        let week_interval = Duration::weeks(nth as i64 - 1);
+        let day_interval = Duration::days(nth as i64 - 1);
 
         let d = match *self {
             FrequencyMonthDay::Monday
@@ -201,21 +231,82 @@ impl FrequencyMonthDay {
                 increment_to_weekday(date, self.get_day_of_week(), Duration::weeks(1))
                     + week_interval
             }
-            FrequencyMonthDay::Day => date + day_interval,
-            FrequencyMonthDay::Weekday => {
-                if weekday + nth < 6 {
+            FrequencyMonthDay::Day => {
+                if seek_last {
+                    // This will never fail as we check the month length in advance
+                    date.with_day(length).unwrap()
+                } else {
                     date + day_interval
-                } else {
-                    increment_to_weekday(date, 1, Duration::weeks(1)) + day_interval
                 }
             }
-            FrequencyMonthDay::Weekend => {
-                if weekday >= 6 && weekday <= 7 {
-                    date + week_interval
-                } else {
-                    increment_to_weekday(date, 6, Duration::weeks(1)) + week_interval
+            FrequencyMonthDay::Weekday if !seek_last => {
+                // Account for day offset. If the first day of the month is Monday, the
+                // offset will be zero. Otherwise it will track the number of days offset
+                // from Monday the first date is.
+                let offset = weekday - 1;
+
+                // If this month date spans the weekend, increment by weekend length (i.e. 2)
+                if nth + offset > 5 {
+                    nth += 2;
                 }
+
+                date.with_day(nth).unwrap()
             }
+            FrequencyMonthDay::Weekday if seek_last => {
+                // 28 days is the minimum month length and exactly 4 weeks from the
+                // first day. Thus `weekday` for day 28 = `weekday` for day 7. In order
+                // to get an offset that tells us how to find the final day, subtract by
+                // 29 instead, which is = to `weekday` for day 1.
+                let mut offset = length as i32 - 29;
+                let last_weekday = weekday as i32 + offset;
+
+                // Adjust for weekend
+                if last_weekday > 5 {
+                    offset -= last_weekday - 5;
+                }
+
+                date.with_day((29 + offset) as u32).unwrap()
+            }
+            FrequencyMonthDay::Weekend if !seek_last => {
+                // Calculate the number of days 'offset' the month is. I.e. how many
+                // non-weekend days occur before our first weekend.
+                let offset = if weekday == 7 { 0 } else { 6 - weekday };
+
+                // If the month start on a day <= Saturday, we have a full first weekend.
+                // However the `weekdays` formula uses `nth / 2` to determine whether a
+                // set of weekdays lies between the previous weekend and this one. If we
+                // have a full first weekend, the formula would give us a date for nth=2
+                // of 7. Thus we subtract 1 in order that the formula doesn't apply any
+                // weekdays to the first full weekend. However, if the weekend starts on
+                // Sunday, this behaviour is desirable, so increment by 1.
+                let nth_adjusted = nth - 1 + weekday / 7;
+
+                // Calculate how many sets of weekdays sit between each weekend pair.
+                // This is important because the 3rd, 4th and 5th weekend days are
+                // separated by 1 or 2 sets of weekdays.
+                let weekdays = nth_adjusted / 2 * 5;
+
+                // Add all the components together to get our date.
+                let month_date = nth + offset + weekdays;
+
+                date.with_day(month_date).unwrap()
+            }
+            FrequencyMonthDay::Weekend if seek_last => {
+                // 28 days is the minimum month length and exactly 4 weeks from the
+                // first day. Thus `weekday` for day 28 = `weekday` for day 7. In order
+                // to get an offset that tells us how to find the final day, subtract by
+                // 29 instead, which is = to `weekday` for day 1.
+                let mut offset = length as i32 - 29;
+                let last_weekday = weekday as i32 + offset;
+
+                // Adjust for weekend
+                if last_weekday < 6 {
+                    offset -= last_weekday;
+                }
+
+                date.with_day((29 + offset) as u32).unwrap()
+            }
+            _ => unreachable!(),
         };
 
         Some(d)
@@ -395,80 +486,136 @@ mod tests {
     }
 
     #[test]
-    fn increment_to_day_today() {
+    fn get_date_today() {
         let frequency = FrequencyMonthDay::Saturday;
-        let date = Utc.ymd(2000, 4, 1);
-        assert_eq!(frequency.increment_to_day(date, 1), Some(date));
+        let new_date = Utc.ymd(2000, 4, 1);
+        assert_eq!(frequency.get_date(2000, 4, 1), Some(new_date));
     }
 
     #[test]
-    fn increment_to_day_next_week() {
+    fn get_date_next_week() {
         let frequency = FrequencyMonthDay::Monday;
-        let date = Utc.ymd(2000, 4, 1);
         let new_date = Utc.ymd(2000, 4, 3);
-        assert_eq!(frequency.increment_to_day(date, 1), Some(new_date));
+        assert_eq!(frequency.get_date(2000, 4, 1), Some(new_date));
     }
 
     #[test]
-    fn increment_to_day_nth_week() {
+    fn get_date_nth_week() {
         let frequency = FrequencyMonthDay::Monday;
-        let date = Utc.ymd(2000, 4, 1);
         let new_date = Utc.ymd(2000, 4, 17);
-        assert_eq!(frequency.increment_to_day(date, 3), Some(new_date));
+        assert_eq!(frequency.get_date(2000, 4, 3), Some(new_date));
     }
 
     #[test]
-    fn increment_to_day_day() {
+    fn get_date_day() {
         let frequency = FrequencyMonthDay::Day;
         let date = Utc.ymd(2000, 4, 1);
         let new_date = Utc.ymd(2000, 4, 4);
-        assert_eq!(frequency.increment_to_day(date, 4), Some(new_date));
+        assert_eq!(frequency.get_date(2000, 4, 4), Some(new_date));
     }
 
     #[test]
-    fn increment_to_day_weekday_today() {
+    fn get_date_weekday_today() {
         let frequency = FrequencyMonthDay::Weekday;
-        let date = Utc.ymd(2000, 5, 1);
-        assert_eq!(frequency.increment_to_day(date, 1), Some(date));
+        let new_date = Utc.ymd(2000, 5, 1);
+        assert_eq!(frequency.get_date(2000, 5, 1), Some(new_date));
     }
 
     #[test]
-    fn increment_to_day_weekday_nth() {
+    fn get_date_weekday_fourth() {
         let frequency = FrequencyMonthDay::Weekday;
-        let date = Utc.ymd(2000, 4, 1);
-        let new_date = Utc.ymd(2000, 4, 6);
-        assert_eq!(frequency.increment_to_day(date, 4), Some(new_date));
+        let new_date = Utc.ymd(2000, 3, 6);
+        assert_eq!(frequency.get_date(2000, 3, 4), Some(new_date));
     }
 
     #[test]
-    fn increment_to_day_weekend_today() {
-        let frequency = FrequencyMonthDay::Weekend;
-        let date = Utc.ymd(2000, 4, 1);
-        assert_eq!(frequency.increment_to_day(date, 1), Some(date));
+    fn get_date_weekday_fifth() {
+        let frequency = FrequencyMonthDay::Weekday;
+        let new_date = Utc.ymd(2000, 2, 7);
+        assert_eq!(frequency.get_date(2000, 2, 5), Some(new_date));
     }
 
     #[test]
-    fn increment_to_day_weekend_nth() {
+    fn get_date_weekday_weekend() {
+        let frequency = FrequencyMonthDay::Weekday;
+        let new_date = Utc.ymd(2000, 1, 3);
+        assert_eq!(frequency.get_date(2000, 1, 1), Some(new_date));
+    }
+
+    #[test]
+    fn get_date_weekend_today() {
         let frequency = FrequencyMonthDay::Weekend;
-        let date = Utc.ymd(2000, 5, 1);
+        let new_date = Utc.ymd(2000, 4, 1);
+        assert_eq!(frequency.get_date(2000, 4, 1), Some(new_date));
+    }
+
+    #[test]
+    fn get_date_weekend_first() {
+        let frequency = FrequencyMonthDay::Weekend;
         let new_date = Utc.ymd(2000, 5, 6);
-        assert_eq!(frequency.increment_to_day(date, 1), Some(new_date));
+        assert_eq!(frequency.get_date(2000, 5, 1), Some(new_date));
     }
 
     #[test]
-    fn increment_to_day_last_friday() {
-        // last week, invalid day (5th week)
+    fn get_date_weekend_second() {
+        let frequency = FrequencyMonthDay::Weekend;
+        let new_date = Utc.ymd(2000, 10, 7);
+        assert_eq!(frequency.get_date(2000, 10, 2), Some(new_date));
+    }
+
+    #[test]
+    fn get_date_last_friday() {
         let frequency = FrequencyMonthDay::Friday;
-        let date = Utc.ymd(2000, 4, 1);
         let new_date = Utc.ymd(2000, 4, 28);
-        assert_eq!(frequency.increment_to_day(date, 0), Some(new_date));
+        assert_eq!(frequency.get_date(2000, 4, 0), Some(new_date));
     }
 
     #[test]
-    fn increment_to_day_invalid_date() {
+    fn get_date_last_day() {
+        let frequency = FrequencyMonthDay::Day;
+        let new_date = Utc.ymd(2000, 4, 30);
+        assert_eq!(frequency.get_date(2000, 4, 0), Some(new_date));
+    }
+
+    #[test]
+    fn get_date_last_weekday_fri() {
+        let frequency = FrequencyMonthDay::Weekday;
+        let new_date = Utc.ymd(2000, 4, 28);
+        assert_eq!(frequency.get_date(2000, 4, 0), Some(new_date));
+    }
+
+    #[test]
+    fn get_date_last_weekday_wed() {
+        let frequency = FrequencyMonthDay::Weekday;
+        let new_date = Utc.ymd(2000, 5, 31);
+        assert_eq!(frequency.get_date(2000, 5, 0), Some(new_date));
+    }
+
+    #[test]
+    fn get_date_last_weekday_feb() {
+        let frequency = FrequencyMonthDay::Weekday;
+        let new_date = Utc.ymd(2001, 2, 28);
+        assert_eq!(frequency.get_date(2001, 2, 0), Some(new_date));
+    }
+
+    #[test]
+    fn get_date_last_weekend_today() {
+        let frequency = FrequencyMonthDay::Weekend;
+        let new_date = Utc.ymd(2000, 9, 30);
+        assert_eq!(frequency.get_date(2000, 9, 0), Some(new_date));
+    }
+
+    #[test]
+    fn get_date_last_weekend_may() {
+        let frequency = FrequencyMonthDay::Weekend;
+        let new_date = Utc.ymd(2000, 5, 28);
+        assert_eq!(frequency.get_date(2000, 5, 0), Some(new_date));
+    }
+
+    #[test]
+    fn get_date_invalid_date() {
         let frequency = FrequencyMonthDay::Friday;
-        let date = Utc.ymd(2000, 4, 1);
-        assert_eq!(frequency.increment_to_day(date, 5), None);
+        assert_eq!(frequency.get_date(2000, 4, 5), None);
     }
 
     #[test]
@@ -600,4 +747,10 @@ mod tests {
 
         assert_eq!(frequency.get_payment_days(start, None), dates);
     }
+
+    // #[test]
+    // fn get_payment_days_yearly_nth_end_date() {
+    //     let frequency = Frequency::Yearly(2, vec![1, 2], Some(0), FrequencyMonthDay::Weekend)
+
+    // }
 }
