@@ -49,7 +49,7 @@ impl Frequency {
         }
     }
 
-    pub fn get_payment_days(&self, start: Date<Utc>, end: Option<Date<Utc>>) -> Vec<Date<Utc>> {
+    pub fn get_payment_dates(&self, start: Date<Utc>, end: Option<Date<Utc>>) -> Vec<Date<Utc>> {
         let period_end = start + self.get_period_length();
         let end = end.unwrap_or_else(|| period_end);
 
@@ -678,7 +678,7 @@ mod tests {
             Utc.ymd(2000, 5, 21),
         ];
 
-        assert_eq!(frequency.get_payment_days(start, Some(end)), days);
+        assert_eq!(frequency.get_payment_dates(start, Some(end)), days);
     }
 
     #[test]
@@ -687,7 +687,7 @@ mod tests {
         let start = Utc.ymd(2000, 4, 1);
         let days = vec![start, Utc.ymd(2000, 4, 11)];
 
-        assert_eq!(frequency.get_payment_days(start, None), days);
+        assert_eq!(frequency.get_payment_dates(start, None), days);
     }
 
     #[test]
@@ -712,7 +712,7 @@ mod tests {
             Utc.ymd(2000, 6, 30),
         ];
 
-        assert_eq!(frequency.get_payment_days(start, Some(end)), dates);
+        assert_eq!(frequency.get_payment_dates(start, Some(end)), dates);
     }
 
     #[test]
@@ -725,7 +725,7 @@ mod tests {
             Utc.ymd(2000, 4, 24),
         ];
 
-        assert_eq!(frequency.get_payment_days(start, None), dates);
+        assert_eq!(frequency.get_payment_dates(start, None), dates);
     }
 
     #[test]
@@ -771,7 +771,7 @@ mod tests {
             Utc.ymd(2004, 2, 29),
         ];
 
-        assert_eq!(frequency.get_payment_days(start, Some(end)), dates);
+        assert_eq!(frequency.get_payment_dates(start, Some(end)), dates);
     }
 
     #[test]
@@ -791,7 +791,7 @@ mod tests {
             Utc.ymd(2004, 1, 31),
         ];
 
-        assert_eq!(frequency.get_payment_days(start, None), dates);
+        assert_eq!(frequency.get_payment_dates(start, None), dates);
     }
 
     #[test]
@@ -811,7 +811,7 @@ mod tests {
             Utc.ymd(2008, 1, 27),
         ];
 
-        assert_eq!(frequency.get_payment_days(start, Some(end)), dates);
+        assert_eq!(frequency.get_payment_dates(start, Some(end)), dates);
     }
 
     #[test]
@@ -825,7 +825,7 @@ mod tests {
             Utc.ymd(2002, 2, 24),
         ];
 
-        assert_eq!(frequency.get_payment_days(start, None), dates);
+        assert_eq!(frequency.get_payment_dates(start, None), dates);
     }
 
     #[test]
@@ -843,7 +843,7 @@ mod tests {
             Utc.ymd(2008, 1, 29),
         ];
 
-        assert_eq!(frequency.get_payment_days(start, Some(end)), dates);
+        assert_eq!(frequency.get_payment_dates(start, Some(end)), dates);
     }
 
     #[test]
@@ -857,6 +857,6 @@ mod tests {
             Utc.ymd(2004, 1, 29),
         ];
 
-        assert_eq!(frequency.get_payment_days(start, None), dates);
+        assert_eq!(frequency.get_payment_dates(start, None), dates);
     }
 }
