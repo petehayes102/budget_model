@@ -6,7 +6,7 @@ use chrono::{Date, Datelike, Duration, LocalResult, TimeZone, Utc};
 pub(super) const MACRO_PERIOD: u32 = (365.25 * 4.0) as u32;
 
 // These are tedious arrays to aid the lookup of month lengths. Unfortunately the
-// `chrono` library does not give us a static approach for this.
+// `chrono` library does not give us helpers for this.
 const MONTH_LENGTHS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 const MONTH_LENGTHS_LEAP: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
@@ -38,7 +38,10 @@ impl Frequency {
     pub fn get_period_length(&self) -> Duration {
         match *self {
             Frequency::Once => Duration::days(1),
-            Frequency::Daily(days) => Duration::days(days as i64),
+            // Note that we add 1 to days as a "2 day" frequency means "every second day".
+            // Thus, days 1 and 3. This actually a 3 day period, when you include the
+            // start day.
+            Frequency::Daily(days) => Duration::days((days + 1) as i64),
             Frequency::Weekly(weeks, _) => Duration::weeks(weeks as i64),
             // Months and years (i.e. leap years) have differing lengths, so assuming no
             // end date, any recursion involving months and years is inherently uneven.
@@ -402,7 +405,7 @@ mod tests {
     #[test]
     fn get_period_length_daily() {
         let freq = Frequency::Daily(4);
-        assert_eq!(freq.get_period_length(), Duration::days(4));
+        assert_eq!(freq.get_period_length(), Duration::days(5));
     }
 
     #[test]

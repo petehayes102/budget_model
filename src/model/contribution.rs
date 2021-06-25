@@ -3,7 +3,7 @@ use chrono::{Date, Duration, Utc};
 use thiserror::Error;
 
 /// The daily amount to contribute to an upcoming payment
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Contribution {
     regular: f64,
     last: Option<f64>,
@@ -15,6 +15,10 @@ pub struct Contribution {
 pub enum ContributionError {
     #[error("the start date occurs in the past")]
     HistoricalStartDate,
+    #[error("there are no payments for this contribution")]
+    NoPayments,
+    #[error("the date '{2}' is beyond the range {0} - {1}")]
+    PaymentOutOfBounds(Date<Utc>, Date<Utc>, Date<Utc>), // start, end, oob
 }
 
 impl Contribution {
@@ -48,11 +52,10 @@ impl Contribution {
 /// first payment is tomorrow, I need an 'onboarding' amelioration to cover the payments
 /// we haven't been saving for.
 pub(super) fn calculate(
-    value: CurrencyValue,
-    frequency: Frequency,
+    value: &CurrencyValue,
+    frequency: &Frequency,
     mut start_date: Date<Utc>,
     mut end_date: Option<Date<Utc>>,
-    mut contributions: Vec<Contribution>,
     now: Option<Date<Utc>>, // This allows overriding the current time for testing
 ) -> Result<Vec<Contribution>, ContributionError> {
     let now = now.unwrap_or(Utc::today());
@@ -65,76 +68,43 @@ pub(super) fn calculate(
     // Get payment dates from `Frequency` for start and end dates
     let payments = frequency.get_payment_dates(start_date, end_date);
 
-    // Get period length
-    let length = if let Frequency::Once = frequency {
+    // If we have a fixed period, adjust start and end dates to maximise time available
+    // for contributions. This approach doesn't work for repeating payments where there
+    // is no end date; if our periods are not even, we will accumulate a surplus when we
+    // actually need to break even.
+    if let Frequency::Once = frequency {
         end_date = Some(start_date);
         start_date = now;
-        *end_date.as_ref().unwrap() - start_date
     } else if let Some(end) = end_date.as_mut() {
-        // Adjust start and end dates to maximise time available
         start_date = now;
         *end = *payments.last().unwrap();
+    }
 
-        let mut length = *end - start_date;
+    let mut contributions = Vec::new();
 
-        // @todo Adjust start date (per "Contribution start date algorithm" in Notes)
+    // Recurse over `naive_contribution` until we have contributions for the entire date
+    // range. See description of `naive_contribution` for details
+    while end_date.is_none() || end_date > Some(start_date) {
+        // This sucks but we've got to create a clone of payments here.
+        // `naive_contribution` mutates this vector, which will make it impossible to
+        // track payments earlier than the start date, which can be incremented for fit.
+        let payments_c = payments.clone();
 
-        length
-    } else {
-        frequency.get_period_length()
-    };
+        // Create a new Contribution from naive dates
+        let contribution = naive_contribution(value, &frequency, payments_c, start_date, end_date)?;
 
-    // Calculate contribution amounts
-    let (regular, last) = calculate_for_duration(value, length);
+        // Set end_date to the current start_date. This allows us to measure the
+        // difference between the user-defined start date and the adjusted start date.
+        // If there is a difference, we should setup a new contribution.
+        end_date = Some(contribution.start_date);
 
-    // Add this `Contribution` to the chain
-    contributions.push(Contribution {
-        regular: regular.into(),
-        last: last.map(|l| l.into()),
-        start_date,
-        end_date,
-    });
-
-    // @todo For amelioration:
-    // ---
-    // IF there is an end date:
-    //      Calculate period length from now => start date
-    // ELSE:
-    //      Calculate period length from original start date => start_date
-    // Is period length > 0
-    //      Loop over fn until start date - now == 0
+        // Insert this contribution at the beginning of the vector. Each successive loop
+        // operates on an earlier contribution, so this keeps the vector ordered
+        // correctly.
+        contributions.insert(0, contribution);
+    }
 
     Ok(contributions)
-
-    // --------------------------------------
-    // Thoughts:
-    //
-    // PROBLEM - Some frequencies mean that certain periods are skipped (e.g. "30th of each month" skips February).
-    // ? SOLUTION - When calculating monthly expenses/affordability, take frequency into account as well as contributions.
-    //   PROBLEM - What is a standard period (as above example)?
-    //
-    // PROBLEM - Standard contributions assume that payments are able to be covered prior to period starting.
-    // ? SOLUTION - Spend previous period saving for current period. This might be suboptimal where period are protracted and
-    //              include ample time to save for payments during period.
-    // SOLUTION - Calculate even contributions for period, then modify the start date so that all payments are covered by the time the
-    //            last payment is made. Any initial shortfall is made up by an amelioration.
-    //
-    // PROBLEM - this model assumes we can save contributions after the last payment is made. For example, a contribution
-    //               every week on Mon and Thurs would assume that Fri, Sat and Sun are contributing towards the Mon and Thurs.
-    //               We can't have contributions for past payments!
-    // SOLUTION - Calculate from end of last period to beginning of next, e.g. for a weekly payment on Monday and Saturday, our
-    //            period starts on Sunday and ends on Saturday.
-    //
-    // - if end date, then calculate number of payments between now and end, multiply by value, divide by number of days = std contribution
-    // - if no end,
-    //   INITIAL CONTRIBUTION
-    //   - if now < 1 period away (e.g. bi-monthly recurring expense, with the first payment in 10 days),
-    //     then calculate number of days until first expense = initial contribution
-    //   - if now > 1 period away, then set start date to exactly 1 period before first expense
-    //
-    //   STD CONTRIBUTION
-    //   - for each period (e.g. every 3 days = 3 day period), calculate number of payments, calculate days in period, divide total payments by days in period = std contribution,
-    //     then set start date of std contribution to day after end of previous period. If date is prior to today (tomorrow?) then set an amelioration to make up shortfall.
 }
 
 /// Adjust the start and end dates to appropriate values for the given `Frequency`.
@@ -150,11 +120,143 @@ pub(super) fn calculate(
 /// payment. Otherwise when calculating daily contributions, we would include days
 /// that don't contribute to any payment, resulting in a shortfall on the last n
 /// payments.
-pub fn align_dates(start: &mut Date<Utc>, end: Option<&mut Date<Utc>>) {}
+fn naive_contribution(
+    value: &CurrencyValue,
+    frequency: &Frequency,
+    mut payments: Vec<Date<Utc>>,
+    start_date: Date<Utc>,
+    end_date: Option<Date<Utc>>,
+) -> Result<Contribution, ContributionError> {
+    // If there aren't any payments, there shouldn't be a `Contribution`
+    if payments.is_empty() {
+        return Err(ContributionError::NoPayments);
+    }
+
+    // Setup a fixed end date that is either the user defined date, or the last day of
+    // the period. Note we need to subtract 1 day as we want the *last* day of the period
+    // rather than the first day of the next period.
+    let period_end =
+        end_date.unwrap_or(start_date + frequency.get_period_length() - Duration::days(1));
+
+    // Define period length
+    // Note we add a day here as we are calculating length, not difference
+    let length = period_end - start_date + Duration::days(1);
+
+    // For these algorithms to work, we need an ordered list
+    payments.sort_unstable();
+
+    // Make sure we never process payments beyond the start and end bounds
+    if payments.first() < Some(&start_date) {
+        return Err(ContributionError::PaymentOutOfBounds(
+            start_date,
+            period_end,
+            *payments.first().unwrap(),
+        ));
+    } else if let Some(end) = end_date {
+        if payments.last() > Some(&end) {
+            return Err(ContributionError::PaymentOutOfBounds(
+                start_date,
+                end,
+                *payments.last().unwrap(),
+            ));
+        }
+    }
+
+    // Calculate contribution amounts
+    let total = CurrencyValue(**value * payments.len() as i64);
+    let (regular, last) = calculate_for_duration(&total, length);
+
+    // If every day in period has a payment, we don't need to modify the start date
+    if payments.len() as i64 == length.num_days() {
+        return Ok(Contribution {
+            regular: regular.into(),
+            last: last.map(|l| l.into()),
+            start_date,
+            end_date,
+        });
+    }
+
+    // If there is no payment on the last day, we will end up accumulating contributions
+    // after the last payment. This means that we won't actually cover the last payment
+    // until after it's been made. Ladies and gentlemen, we cannot stand for this!
+    if *payments.last().unwrap() < period_end {
+        // If an end date exists, shift it forward to the last payment
+        if end_date.is_some() {
+            let last = *payments.last().unwrap();
+
+            return naive_contribution(value, frequency, payments, start_date, Some(last));
+        }
+        // If no end date exists, rotate the period to the second payment
+        else {
+            let first = payments.remove(0);
+            let new_start = first.succ();
+            payments.push(first + length);
+
+            return naive_contribution(value, frequency, payments, new_start, None);
+        }
+    }
+
+    // If there is a payment on the start day, the contribution must equal the payment.
+    // Otherwise we won't be able to cover today's payment! However as not every day in
+    // the period has a payment, we will end up with a surplus. Thus today cannot be the
+    // start date.
+    if payments.first().unwrap() == &start_date {
+        let first = payments.remove(0);
+
+        // If there is no end date, we have an infinitely recurring period. This means
+        // that the first payment will now become the last payment. Hence we need to move
+        // it!
+        if end_date.is_none() {
+            payments.push(first + length);
+        }
+
+        return naive_contribution(value, frequency, payments, start_date.succ(), end_date);
+    }
+
+    // Loop through each payment to ensure that contributions keep up with the payments.
+    // If not, shift the start date and try again.
+    let mut acc = *regular;
+    let mut prev_payment = &start_date;
+    for payment in payments.iter() {
+        let duration = *payment - *prev_payment;
+
+        // Calculate current accumulated balance
+        acc += duration.num_days() * *regular - **value;
+
+        // If this is the last payment, swap the regular contribution for the final one
+        if Some(payment) == payments.last() {
+            if let Some(l) = last.as_ref() {
+                acc += **l - *regular;
+            }
+        }
+
+        // If we go below zero, this contribution and start_date combination are not
+        // sustainable.
+        if acc < 0 {
+            break;
+        }
+
+        prev_payment = payment;
+    }
+
+    // Handle broken contribution by iterating the start date until we find a sustainable
+    // date. Note that we don't shift any payment dates here. If we had a payment today,
+    // it would be caught by earlier start date checks and handled there.
+    if acc < 0 {
+        naive_contribution(value, frequency, payments, start_date.succ(), end_date)
+    } else {
+        Ok(Contribution {
+            regular: regular.into(),
+            last: last.map(|l| l.into()),
+            start_date,
+            end_date,
+        })
+    }
+}
 
 // Calculate the contribution amounts for a value and duration
 fn calculate_for_duration(
-    value: CurrencyValue,
+    value: &CurrencyValue,
     duration: Duration,
 ) -> (CurrencyValue, Option<CurrencyValue>) {
     // PROBLEM - If a payment is set for a sufficiently long time away, or for a very small amount, our contributions
@@ -165,12 +267,12 @@ fn calculate_for_duration(
     // Note that non-floating point integers automatically round down, which
     // could lead to exaggerated final payments. Thus we convert to a float,
     // then round manually.
-    let regular = (*value as f64 / duration.num_days() as f64).round() as i64;
+    let regular = (**value as f64 / duration.num_days() as f64).round() as i64;
 
     // Given the rounding of the regular contribution, we may need a
     // different final contribution to handle the rounding error.
-    let last = if regular * duration.num_days() != *value {
-        Some(CurrencyValue(*value - regular * (duration.num_days() - 1)))
+    let last = if regular * duration.num_days() != **value {
+        Some(CurrencyValue(**value - regular * (duration.num_days() - 1)))
     } else {
         None
     };
@@ -178,8 +280,8 @@ fn calculate_for_duration(
     // The regular and last payments must equal the value, or our maths is
     // fundamentally broken!
     match last {
-        Some(ref l) => assert_eq!(*value, regular * (duration.num_days() - 1) + **l),
-        None => assert_eq!(*value, regular * duration.num_days()),
+        Some(ref l) => assert_eq!(**value, regular * (duration.num_days() - 1) + **l),
+        None => assert_eq!(**value, regular * duration.num_days()),
     }
 
     (CurrencyValue(regular), last)
@@ -193,7 +295,7 @@ mod tests {
 
     #[test]
     fn calculate_for_duration_exact() {
-        let (regular, last) = calculate_for_duration(9f64.try_into().unwrap(), Duration::days(4));
+        let (regular, last) = calculate_for_duration(&9f64.try_into().unwrap(), Duration::days(4));
 
         assert_eq!(*regular, 225);
         assert_eq!(last, None);
@@ -202,7 +304,7 @@ mod tests {
     #[test]
     fn calculate_for_duration_rounddown() {
         let (regular, last) =
-            calculate_for_duration(9.57f64.try_into().unwrap(), Duration::days(4));
+            calculate_for_duration(&9.57f64.try_into().unwrap(), Duration::days(4));
 
         assert_eq!(*regular, 239);
         assert_eq!(last.map(|l| *l), Some(240));
@@ -211,7 +313,7 @@ mod tests {
     #[test]
     fn calculate_for_duration_roundup() {
         let (regular, last) =
-            calculate_for_duration(11.1f64.try_into().unwrap(), Duration::days(4));
+            calculate_for_duration(&11.1f64.try_into().unwrap(), Duration::days(4));
 
         assert_eq!(*regular, 278);
         assert_eq!(last.map(|l| *l), Some(276));
@@ -220,11 +322,10 @@ mod tests {
     #[test]
     fn calculate_contribution_historical() {
         let result = calculate(
-            1f64.try_into().unwrap(),
-            Frequency::Once,
+            &1f64.try_into().unwrap(),
+            &Frequency::Once,
             Utc.ymd(2000, 4, 1),
             None,
-            Vec::new(),
             Some(Utc.ymd(2000, 4, 2)),
         );
 
@@ -247,5 +348,300 @@ mod tests {
     fn contribution_no_expiry() {
         let c = Contribution::new(1.0, None, Utc::today(), None);
         assert!(!c.has_expired());
+    }
+
+    #[test]
+    fn naive_contribution_start_oob() {
+        let start = Utc.ymd(2000, 1, 2);
+        let payment = Utc.ymd(2000, 1, 1);
+        let payments = vec![payment];
+        let contribution =
+            naive_contribution(&CurrencyValue(100), &Frequency::Once, payments, start, None);
+        assert_eq!(
+            contribution.err(),
+            Some(ContributionError::PaymentOutOfBounds(
+                start,
+                Utc.ymd(2000, 1, 2),
+                payment
+            ))
+        );
+    }
+
+    #[test]
+    fn naive_contribution_end_oob() {
+        let start = Utc.ymd(2000, 1, 2);
+        let end = Utc.ymd(2000, 1, 3);
+        let payment = Utc.ymd(2000, 1, 4);
+        let payments = vec![payment];
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Once,
+            payments,
+            start,
+            Some(end),
+        );
+        assert_eq!(
+            contribution.err(),
+            Some(ContributionError::PaymentOutOfBounds(start, end, payment))
+        );
+    }
+
+    #[test]
+    fn naive_contribution_empty_payments() {
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Once,
+            Vec::new(),
+            Utc.ymd(2000, 1, 2),
+            None,
+        );
+        assert_eq!(contribution.err(), Some(ContributionError::NoPayments));
+    }
+
+    #[test]
+    fn naive_contribution_daily() {
+        let start = Utc.ymd(2000, 1, 1);
+        let end = Utc.ymd(2000, 1, 5);
+        let payments = vec![
+            start,
+            Utc.ymd(2000, 1, 2),
+            Utc.ymd(2000, 1, 3),
+            Utc.ymd(2000, 1, 4),
+            end,
+        ];
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Daily(1),
+            payments,
+            start,
+            Some(end),
+        );
+        assert_eq!(
+            contribution,
+            Ok(Contribution {
+                regular: 1.0,
+                last: None,
+                start_date: start,
+                end_date: Some(end),
+            })
+        );
+    }
+
+    #[test]
+    fn naive_contribution_start_with_end() {
+        let start = Utc.ymd(2000, 1, 1);
+        let end = Utc.ymd(2000, 1, 3);
+        let payments = vec![start, end];
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Daily(2),
+            payments,
+            start,
+            Some(end),
+        );
+        assert_eq!(
+            contribution,
+            Ok(Contribution {
+                regular: 0.5,
+                last: None,
+                start_date: start.succ(),
+                end_date: Some(end),
+            })
+        );
+    }
+
+    #[test]
+    fn naive_contribution_start_no_end() {
+        let start = Utc.ymd(2000, 1, 1);
+        let end = Utc.ymd(2000, 1, 3);
+        let payments = vec![start, end];
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Daily(2),
+            payments,
+            start,
+            None,
+        );
+        assert_eq!(
+            contribution,
+            Ok(Contribution {
+                regular: 0.67,
+                last: Some(0.66),
+                start_date: start.succ(),
+                end_date: None,
+            })
+        );
+    }
+
+    #[test]
+    fn naive_contribution_end_with_date() {
+        let start = Utc.ymd(2000, 1, 1);
+        let end = Utc.ymd(2000, 1, 3);
+        let pay_end = Utc.ymd(2000, 1, 2);
+        let payments = vec![start, pay_end];
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Daily(1),
+            payments,
+            start,
+            Some(end),
+        );
+        assert_eq!(
+            contribution,
+            Ok(Contribution {
+                regular: 1.0,
+                last: None,
+                start_date: start,
+                end_date: Some(pay_end),
+            })
+        );
+    }
+
+    #[test]
+    fn naive_contribution_end_no_date() {
+        let start = Utc.ymd(2000, 1, 3);
+        let payments = vec![
+            Utc.ymd(2000, 1, 5),
+            Utc.ymd(2000, 1, 6),
+            Utc.ymd(2000, 1, 7),
+        ];
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Weekly(1, vec![3, 4, 5]),
+            payments,
+            start,
+            None,
+        );
+        assert_eq!(
+            contribution,
+            Ok(Contribution {
+                regular: 0.43,
+                last: Some(0.42),
+                start_date: Utc.ymd(2000, 1, 8),
+                end_date: None,
+            })
+        );
+    }
+
+    #[test]
+    fn naive_contribution_pattern1() {
+        let start = Utc.ymd(2000, 4, 3);
+        let payments = vec![
+            start,
+            Utc.ymd(2000, 4, 4),
+            Utc.ymd(2000, 4, 6),
+            Utc.ymd(2000, 4, 7),
+        ];
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Weekly(1, vec![1, 2, 4, 5]),
+            payments,
+            start,
+            None,
+        );
+        assert_eq!(
+            contribution,
+            Ok(Contribution {
+                regular: 0.57,
+                last: Some(0.58),
+                start_date: Utc.ymd(2000, 4, 8),
+                end_date: None,
+            })
+        );
+    }
+
+    #[test]
+    fn naive_contribution_pattern2() {
+        let payments = vec![
+            Utc.ymd(2000, 4, 4),
+            Utc.ymd(2000, 4, 6),
+            Utc.ymd(2000, 4, 7),
+            Utc.ymd(2000, 4, 9),
+        ];
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Weekly(1, vec![2, 4, 5, 7]),
+            payments,
+            Utc.ymd(2000, 4, 3),
+            None,
+        );
+        assert_eq!(
+            contribution,
+            Ok(Contribution {
+                regular: 0.57,
+                last: Some(0.58),
+                start_date: Utc.ymd(2000, 4, 8),
+                end_date: None,
+            })
+        );
+    }
+
+    #[test]
+    fn naive_contribution_pattern3() {
+        let payments = vec![
+            Utc.ymd(2000, 4, 3),
+            Utc.ymd(2000, 4, 4),
+            Utc.ymd(2000, 4, 5),
+            Utc.ymd(2000, 4, 6),
+            Utc.ymd(2000, 4, 9),
+        ];
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Weekly(1, vec![1, 2, 3, 4, 7]),
+            payments,
+            Utc.ymd(2000, 4, 3),
+            None,
+        );
+        assert_eq!(
+            contribution,
+            Ok(Contribution {
+                regular: 0.71,
+                last: Some(0.74),
+                start_date: Utc.ymd(2000, 4, 7),
+                end_date: None,
+            })
+        );
+    }
+
+    #[test]
+    fn naive_contribution_pattern4() {
+        let payments = vec![Utc.ymd(2000, 4, 4), Utc.ymd(2000, 4, 8)];
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Weekly(1, vec![2, 6]),
+            payments,
+            Utc.ymd(2000, 4, 3),
+            None,
+        );
+        assert_eq!(
+            contribution,
+            Ok(Contribution {
+                regular: 0.29,
+                last: Some(0.26),
+                start_date: Utc.ymd(2000, 4, 5),
+                end_date: None,
+            })
+        );
+    }
+
+    #[test]
+    fn naive_contribution_pattern5() {
+        let payments = vec![Utc.ymd(2000, 4, 6), Utc.ymd(2000, 4, 9)];
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Weekly(1, vec![4, 6]),
+            payments,
+            Utc.ymd(2000, 4, 3),
+            None,
+        );
+        assert_eq!(
+            contribution,
+            Ok(Contribution {
+                regular: 0.29,
+                last: Some(0.26),
+                start_date: Utc.ymd(2000, 4, 3),
+                end_date: None,
+            })
+        );
     }
 }
