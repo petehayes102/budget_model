@@ -43,12 +43,16 @@ impl Frequency {
             // start day.
             Frequency::Daily(days) => Duration::days((days + 1) as i64),
             Frequency::Weekly(weeks, _) => Duration::weeks(weeks as i64),
-            // Months and years (i.e. leap years) have differing lengths, so assuming no
-            // end date, any recursion involving months and years is inherently uneven.
-            // Thus we use the MACRO_PERIOD const to smooth the variability.
-            Frequency::MonthlyDate(_, _)
-            | Frequency::MonthlyDay(_, _, _)
-            | Frequency::Yearly(_, _, _, _) => Duration::days(MACRO_PERIOD as i64),
+            Frequency::MonthlyDate(months, _) | Frequency::MonthlyDay(months, _, _) => {
+                // The period length must be units of `MACRO_PERIOD` in order to handle
+                // leap years.
+                to_macro_periods(months as f32 * 365.25 / 12.0)
+            }
+            Frequency::Yearly(years, _, _, _) => {
+                // The period length must be units of `MACRO_PERIOD` in order to handle
+                // leap years.
+                to_macro_periods(years as f32 * 365.25)
+            }
         }
     }
 
@@ -333,6 +337,16 @@ impl FrequencyMonthDay {
     }
 }
 
+// Where we recurse over months or years, we have to handle different period lengths. For
+// example, January has 31 days, February has 28 days (but 29 on a leap year), and April
+// has 30 days. In order to calculate a single daily contribution that handles all this
+// variability, we amortise the recursion over a 4 year period. This guarantees that we
+// have a consistent number of days, irrespective of months or leap years.
+fn to_macro_periods(days: f32) -> Duration {
+    let num_macro = (days / MACRO_PERIOD as f32).ceil() as i64;
+    Duration::days(num_macro * MACRO_PERIOD as i64)
+}
+
 // Get dates at given interval from start until end date
 fn get_dates_for_interval(interval: Duration, start: Date<Utc>, end: Date<Utc>) -> Vec<Date<Utc>> {
     let mut payments = vec![start];
@@ -437,6 +451,33 @@ mod tests {
         assert_eq!(
             freq.get_period_length(),
             Duration::days(MACRO_PERIOD as i64)
+        );
+    }
+
+    #[test]
+    fn get_period_length_monthly_date_gt_macro() {
+        let freq = Frequency::MonthlyDate(49, vec![1]);
+        assert_eq!(
+            freq.get_period_length(),
+            Duration::days(MACRO_PERIOD as i64 * 2)
+        );
+    }
+
+    #[test]
+    fn get_period_length_monthly_day_gt_macro() {
+        let freq = Frequency::MonthlyDay(49, 1, FrequencyMonthDay::Day);
+        assert_eq!(
+            freq.get_period_length(),
+            Duration::days(MACRO_PERIOD as i64 * 2)
+        );
+    }
+
+    #[test]
+    fn get_period_length_yearly_gt_macro() {
+        let freq = Frequency::Yearly(5, vec![1], None, None);
+        assert_eq!(
+            freq.get_period_length(),
+            Duration::days(MACRO_PERIOD as i64 * 2)
         );
     }
 
