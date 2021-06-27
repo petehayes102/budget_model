@@ -61,12 +61,12 @@ pub(super) fn calculate(
     let now = now.unwrap_or(Utc::today());
 
     // We don't allow contributions that start in the past
-    if now >= start_date {
+    if now > start_date {
         return Err(ContributionError::HistoricalStartDate);
     }
 
     // Get payment dates from `Frequency` for start and end dates
-    let payments = frequency.get_payment_dates(start_date, end_date);
+    let mut payments = frequency.get_payment_dates(start_date, end_date);
 
     // If we have a fixed period, adjust start and end dates to maximise time available
     // for contributions. This approach doesn't work for repeating payments where there
@@ -82,9 +82,8 @@ pub(super) fn calculate(
 
     let mut contributions = Vec::new();
 
-    // Recurse over `naive_contribution` until we have contributions for the entire date
-    // range. See description of `naive_contribution` for details
-    while end_date.is_none() || end_date > Some(start_date) {
+    // Recurse over `naive_contribution` until we have contributions for every payment
+    while payments.len() > 0 {
         // This sucks but we've got to create a clone of payments here.
         // `naive_contribution` mutates this vector, which will make it impossible to
         // track payments earlier than the start date, which can be incremented for fit.
@@ -92,6 +91,9 @@ pub(super) fn calculate(
 
         // Create a new Contribution from naive dates
         let contribution = naive_contribution(value, &frequency, payments_c, start_date, end_date)?;
+
+        // Remove all payments covered by above contribution
+        payments.retain(|p| *p < contribution.start_date);
 
         // Set end_date to the current start_date. This allows us to measure the
         // difference between the user-defined start date and the adjusted start date.
@@ -165,6 +167,24 @@ fn naive_contribution(
     // Calculate contribution amounts
     let total = CurrencyValue(**value * payments.len() as i64);
     let (regular, last) = calculate_for_duration(&total, length);
+
+    // If final contribution equals zero, it means that we've accumulated money too
+    // quickly. Advancing by a day will help to push contributions back so we accumulate
+    // money slower.
+    if *regular == 0 || last.as_ref().map(|l| **l) == Some(0) {
+        if payments.first() == Some(&start_date) {
+            let first = payments.remove(0);
+
+            // If there is no end date, we have an infinitely recurring period. This means
+            // that the first payment will now become the last payment. Hence we need to move
+            // it!
+            if end_date.is_none() {
+                payments.push(first + length);
+            }
+        }
+
+        return naive_contribution(value, frequency, payments, start_date.succ(), end_date);
+    }
 
     // If every day in period has a payment, we don't need to modify the start date
     if payments.len() as i64 == length.num_days() {
@@ -259,10 +279,6 @@ fn calculate_for_duration(
     value: &CurrencyValue,
     duration: Duration,
 ) -> (CurrencyValue, Option<CurrencyValue>) {
-    // PROBLEM - If a payment is set for a sufficiently long time away, or for a very small amount, our contributions
-    // may end up being rounded down to zero, i.e. $0.001 => $0.00 rounded.
-    // SOLUTION - Detect zero contributions and adjust start date until contribution > 0
-
     // Calculate the regular contribution
     // Note that non-floating point integers automatically round down, which
     // could lead to exaggerated final payments. Thus we convert to a float,
@@ -317,19 +333,6 @@ mod tests {
 
         assert_eq!(*regular, 278);
         assert_eq!(last.map(|l| *l), Some(276));
-    }
-
-    #[test]
-    fn calculate_contribution_historical() {
-        let result = calculate(
-            &1f64.try_into().unwrap(),
-            &Frequency::Once,
-            Utc.ymd(2000, 4, 1),
-            None,
-            Some(Utc.ymd(2000, 4, 2)),
-        );
-
-        assert_eq!(result.err(), Some(ContributionError::HistoricalStartDate));
     }
 
     #[test]
@@ -642,6 +645,135 @@ mod tests {
                 start_date: Utc.ymd(2000, 4, 3),
                 end_date: None,
             })
+        );
+    }
+
+    #[test]
+    fn calculate_historical_error() {
+        let result = calculate(
+            &1f64.try_into().unwrap(),
+            &Frequency::Once,
+            Utc.ymd(2000, 4, 1),
+            None,
+            Some(Utc.ymd(2000, 4, 2)),
+        );
+
+        assert_eq!(result.err(), Some(ContributionError::HistoricalStartDate));
+    }
+
+    #[test]
+    fn calculate_once() {
+        let contributions = calculate(
+            &CurrencyValue(100),
+            &Frequency::Once,
+            Utc.ymd(2000, 4, 2),
+            None,
+            Some(Utc.ymd(2000, 4, 1)),
+        );
+        assert_eq!(
+            contributions,
+            Ok(vec![Contribution {
+                regular: 0.5,
+                last: None,
+                start_date: Utc.ymd(2000, 4, 1),
+                end_date: Some(Utc.ymd(2000, 4, 2))
+            }])
+        );
+    }
+
+    #[test]
+    fn calculate_daily_no_end() {
+        let contributions = calculate(
+            &CurrencyValue(100),
+            &Frequency::Daily(2),
+            Utc.ymd(2000, 4, 2),
+            None,
+            Some(Utc.ymd(2000, 4, 1)),
+        );
+        assert_eq!(
+            contributions,
+            Ok(vec![
+                Contribution {
+                    regular: 1.0,
+                    last: None,
+                    start_date: Utc.ymd(2000, 4, 2),
+                    end_date: Some(Utc.ymd(2000, 4, 2))
+                },
+                Contribution {
+                    regular: 0.67,
+                    last: Some(0.66),
+                    start_date: Utc.ymd(2000, 4, 3),
+                    end_date: None
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn calculate_daily_end_today() {
+        let contributions = calculate(
+            &CurrencyValue(100),
+            &Frequency::Daily(2),
+            Utc.ymd(2000, 4, 2),
+            Some(Utc.ymd(2000, 4, 4)),
+            Some(Utc.ymd(2000, 4, 2)),
+        );
+        assert_eq!(
+            contributions,
+            Ok(vec![
+                Contribution {
+                    regular: 1.0,
+                    last: None,
+                    start_date: Utc.ymd(2000, 4, 2),
+                    end_date: Some(Utc.ymd(2000, 4, 2))
+                },
+                Contribution {
+                    regular: 0.5,
+                    last: None,
+                    start_date: Utc.ymd(2000, 4, 3),
+                    end_date: Some(Utc.ymd(2000, 4, 4)),
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn calculate_daily_end_yesterday() {
+        let contributions = calculate(
+            &CurrencyValue(100),
+            &Frequency::Daily(2),
+            Utc.ymd(2000, 4, 2),
+            Some(Utc.ymd(2000, 4, 4)),
+            Some(Utc.ymd(2000, 4, 1)),
+        );
+        assert_eq!(
+            contributions,
+            Ok(vec![Contribution {
+                regular: 0.5,
+                last: None,
+                start_date: Utc.ymd(2000, 4, 1),
+                end_date: Some(Utc.ymd(2000, 4, 4)),
+            }])
+        );
+    }
+
+    #[test]
+    fn calculate_approaching_zero() {
+        let contributions = calculate(
+            &CurrencyValue(1),
+            &Frequency::Once,
+            Utc.ymd(2000, 4, 3),
+            None,
+            Some(Utc.ymd(2000, 4, 1)),
+        );
+        assert_eq!(
+            contributions,
+            Ok(vec![Contribution {
+                regular: 0.01,
+                last: None,
+                start_date: Utc.ymd(2000, 4, 3),
+                end_date: Some(Utc.ymd(2000, 4, 3)),
+            }])
         );
     }
 }
