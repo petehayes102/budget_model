@@ -142,8 +142,7 @@ impl Frequency {
 
                 for year in start.year()..=end.year() {
                     // Only include years that match the recursion
-                    // XXX This breaks on first year
-                    if year % years as i32 == 0 {
+                    if (year - start.year()) % years as i32 == 0 {
                         for m in months {
                             // 'nth day' recursion is optional. If the user hasn't
                             // defined these params, use the start date's day.
@@ -858,6 +857,21 @@ mod tests {
             Utc.ymd(2000, 2, 29),
             Utc.ymd(2002, 1, 29),
             Utc.ymd(2004, 1, 29),
+        ];
+
+        assert_eq!(frequency.get_payment_dates(start, None), dates);
+    }
+
+    #[test]
+    fn get_payment_days_yearly_odd_years() {
+        let frequency = Frequency::Yearly(2, vec![1, 2], None, None);
+        let start = Utc.ymd(2001, 1, 1);
+        let dates = vec![
+            Utc.ymd(2001, 1, 1),
+            Utc.ymd(2001, 2, 1),
+            Utc.ymd(2003, 1, 1),
+            Utc.ymd(2003, 2, 1),
+            Utc.ymd(2005, 1, 1),
         ];
 
         assert_eq!(frequency.get_payment_dates(start, None), dates);
