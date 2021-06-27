@@ -1,5 +1,5 @@
 [package]
-name = "money-poc"
+name = "budget-model"
 version = "0.0.1"
 edition = "2018"
 authors = ["Pete Hayes <pete@hayes.id.au>"]
