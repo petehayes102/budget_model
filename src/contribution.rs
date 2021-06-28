@@ -1,4 +1,4 @@
-use super::{CurrencyValue, Frequency};
+use crate::{frequency::Frequency, CurrencyValue};
 use chrono::{Date, Duration, Utc};
 use thiserror::Error;
 
@@ -21,31 +21,16 @@ pub enum ContributionError {
     PaymentOutOfBounds(Date<Utc>, Date<Utc>, Date<Utc>), // start, end, oob
 }
 
-impl Contribution {
-    /// Create a new `Contribution`
-    pub fn new(
-        regular: f64,
-        last: Option<f64>,
-        start_date: Date<Utc>,
-        end_date: Option<Date<Utc>>,
-    ) -> Self {
-        Contribution {
-            regular,
-            last,
-            start_date,
-            end_date,
-        }
-    }
-
-    /// Returns whether this `Contribution` has expired.
-    /// If `end_date` is not set, this `Contribution` will never expire.
-    pub fn has_expired(&self) -> bool {
-        match self.end_date {
-            Some(date) => date < Utc::today(),
-            None => false,
-        }
-    }
-}
+// impl Contribution {
+//     /// Returns whether this `Contribution` has expired.
+//     /// If `end_date` is not set, this `Contribution` will never expire.
+//     pub fn has_expired(&self) -> bool {
+//         match self.end_date {
+//             Some(date) => date < Utc::today(),
+//             None => false,
+//         }
+//     }
+// }
 
 /// Returns a tuple of the regular contribution and any required onboarding amelioration.
 /// For example, if I have a new weekly payment schedule which starts in 3 days, but the
@@ -335,23 +320,38 @@ mod tests {
         assert_eq!(last.map(|l| *l), Some(276));
     }
 
-    #[test]
-    fn contribution_has_expired() {
-        let c = Contribution::new(1.0, None, Utc::today(), Some(Utc::today().pred()));
-        assert!(c.has_expired());
-    }
+    // #[test]
+    // fn contribution_has_expired() {
+    //     let c = Contribution {
+    //         regular: 1.0,
+    //         last: None,
+    //         start_date: Utc::today(),
+    //         end_date: Some(Utc::today().pred()),
+    //     };
+    //     assert!(c.has_expired());
+    // }
 
-    #[test]
-    fn contribution_has_not_expired() {
-        let c = Contribution::new(1.0, None, Utc::today(), Some(Utc::today()));
-        assert!(!c.has_expired());
-    }
+    // #[test]
+    // fn contribution_has_not_expired() {
+    //     let c = Contribution {
+    //         regular: 1.0,
+    //         last: None,
+    //         start_date: Utc::today(),
+    //         end_date: Some(Utc::today()),
+    //     };
+    //     assert!(!c.has_expired());
+    // }
 
-    #[test]
-    fn contribution_no_expiry() {
-        let c = Contribution::new(1.0, None, Utc::today(), None);
-        assert!(!c.has_expired());
-    }
+    // #[test]
+    // fn contribution_no_expiry() {
+    //     let c = Contribution {
+    //         regular: 1.0,
+    //         last: None,
+    //         start_date: Utc::today(),
+    //         end_date: None,
+    //     };
+    //     assert!(!c.has_expired());
+    // }
 
     #[test]
     fn naive_contribution_start_oob() {

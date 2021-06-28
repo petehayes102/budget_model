@@ -570,7 +570,6 @@ mod tests {
     #[test]
     fn get_date_day() {
         let frequency = FrequencyMonthDay::Day;
-        let date = Utc.ymd(2000, 4, 1);
         let new_date = Utc.ymd(2000, 4, 4);
         assert_eq!(frequency.get_date(2000, 4, 4), Some(new_date));
     }
