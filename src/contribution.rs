@@ -154,9 +154,12 @@ fn naive_contribution(
     let (regular, last) = calculate_for_duration(&total, length);
 
     // If final contribution equals zero, it means that we've accumulated money too
-    // quickly. Advancing by a day will help to push contributions back so we accumulate
-    // money slower.
-    if *regular == 0 || last.as_ref().map(|l| **l) == Some(0) {
+    // quickly. If regular payment equals zero (and we have a fixed end date), then our
+    // period is too long. In either case, advancing by a day will help to push
+    // contributions back so we accumulate money slower.
+    // Note that for periods without an end date, we cannot shorten the period as it
+    // recurs infinitely. If we tried, we would get an infinite loop!
+    if last.as_ref().map(|l| **l) == Some(0) || (*regular == 0 && end_date.is_some()) {
         if payments.first() == Some(&start_date) {
             let first = payments.remove(0);
 
@@ -643,6 +646,48 @@ mod tests {
                 regular: 0.29,
                 last: Some(0.26),
                 start_date: Utc.ymd(2000, 4, 3),
+                end_date: None,
+            })
+        );
+    }
+
+    #[test]
+    fn naive_contribution_pattern6() {
+        let payments = vec![Utc.ymd(2021, 7, 2)];
+        let contribution = naive_contribution(
+            &CurrencyValue(1),
+            &Frequency::Weekly(1, vec![5]),
+            payments,
+            Utc.ymd(2021, 7, 2),
+            None,
+        );
+        assert_eq!(
+            contribution,
+            Ok(Contribution {
+                regular: 0.0,
+                last: Some(0.01),
+                start_date: Utc.ymd(2021, 7, 3),
+                end_date: None,
+            })
+        );
+    }
+
+    #[test]
+    fn naive_contribution_pattern7() {
+        let payments = vec![Utc.ymd(2021, 7, 2)];
+        let contribution = naive_contribution(
+            &CurrencyValue(100),
+            &Frequency::Weekly(1, vec![5]),
+            payments,
+            Utc.ymd(2021, 7, 2),
+            None,
+        );
+        assert_eq!(
+            contribution,
+            Ok(Contribution {
+                regular: 0.14,
+                last: Some(0.16),
+                start_date: Utc.ymd(2021, 7, 3),
                 end_date: None,
             })
         );
