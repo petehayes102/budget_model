@@ -57,7 +57,10 @@ impl Frequency {
     }
 
     pub fn get_payment_dates(&self, start: Date<Utc>, end: Option<Date<Utc>>) -> Vec<Date<Utc>> {
-        let period_end = start + self.get_period_length();
+        // Set period end to yesterday + period length. We do this to prevent the
+        // inclusion of the first day of next period in this period. For example, Monday
+        // + 1 week = Monday. However the _end_ of this period is *Sunday*.
+        let period_end = start.pred() + self.get_period_length();
         let end = end.unwrap_or_else(|| period_end);
 
         match *self {
@@ -707,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn get_payment_days_daily_end_date() {
+    fn get_payment_dates_daily_end_date() {
         let frequency = Frequency::Daily(10);
         let start = Utc.ymd(2000, 4, 1);
         let end = Utc.ymd(2000, 5, 28);
@@ -724,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn get_payment_days_daily_no_end_date() {
+    fn get_payment_dates_daily_no_end_date() {
         let frequency = Frequency::Daily(10);
         let start = Utc.ymd(2000, 4, 1);
         let days = vec![start, Utc.ymd(2000, 4, 11)];
@@ -733,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn get_payment_days_weekly_end_date() {
+    fn get_payment_dates_weekly_end_date() {
         let frequency = Frequency::Weekly(3, vec![1, 3, 5]);
         let start = Utc.ymd(2000, 4, 4);
         let end = Utc.ymd(2000, 6, 30);
@@ -758,10 +761,11 @@ mod tests {
     }
 
     #[test]
-    fn get_payment_days_weekly_no_end_date() {
-        let frequency = Frequency::Weekly(3, vec![1, 3, 5]);
+    fn get_payment_dates_weekly_no_end_date() {
+        let frequency = Frequency::Weekly(3, vec![1, 2, 3, 5]);
         let start = Utc.ymd(2000, 4, 4);
         let dates = vec![
+            Utc.ymd(2000, 4, 4),
             Utc.ymd(2000, 4, 5),
             Utc.ymd(2000, 4, 7),
             Utc.ymd(2000, 4, 24),
@@ -771,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn get_payment_days_monthly_dates_end_date() {
+    fn get_payment_dates_monthly_dates_end_date() {
         let frequency = Frequency::MonthlyDate(6, vec![27, 28, 29, 30, 31]);
         let start = Utc.ymd(1999, 8, 29);
         let end = Utc.ymd(2004, 4, 30);
@@ -817,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn get_payment_days_monthly_dates_no_end_date() {
+    fn get_payment_dates_monthly_dates_no_end_date() {
         let frequency = Frequency::MonthlyDate(9, vec![10, 31]);
         let start = Utc.ymd(2000, 4, 1);
         let dates = vec![
@@ -837,7 +841,21 @@ mod tests {
     }
 
     #[test]
-    fn get_payment_days_yearly_nth_end_date() {
+    fn get_payment_dates_monthly_dates_period_end() {
+        let frequency = Frequency::MonthlyDate(12, vec![1]);
+        let start = Utc.ymd(2000, 4, 1);
+        let dates = vec![
+            Utc.ymd(2000, 4, 1),
+            Utc.ymd(2001, 4, 1),
+            Utc.ymd(2002, 4, 1),
+            Utc.ymd(2003, 4, 1),
+        ];
+
+        assert_eq!(frequency.get_payment_dates(start, None), dates);
+    }
+
+    #[test]
+    fn get_payment_dates_yearly_nth_end_date() {
         let frequency = Frequency::Yearly(2, vec![1, 2], Some(0), Some(FrequencyMonthDay::Weekend));
         let start = Utc.ymd(2000, 1, 1);
         let end = Utc.ymd(2008, 2, 1);
@@ -857,7 +875,7 @@ mod tests {
     }
 
     #[test]
-    fn get_payment_days_yearly_nth_no_end_date() {
+    fn get_payment_dates_yearly_nth_no_end_date() {
         let frequency = Frequency::Yearly(2, vec![1, 2], Some(0), Some(FrequencyMonthDay::Weekend));
         let start = Utc.ymd(2000, 1, 1);
         let dates = vec![
@@ -871,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn get_payment_days_yearly_end_date() {
+    fn get_payment_dates_yearly_end_date() {
         let frequency = Frequency::Yearly(2, vec![1, 2], None, None);
         let start = Utc.ymd(2000, 1, 29);
         let end = Utc.ymd(2008, 2, 1);
@@ -889,25 +907,37 @@ mod tests {
     }
 
     #[test]
-    fn get_payment_days_yearly_no_end_date() {
+    fn get_payment_dates_yearly_no_end_date() {
         let frequency = Frequency::Yearly(2, vec![1, 2], None, None);
         let start = Utc.ymd(2000, 1, 29);
         let dates = vec![
             Utc.ymd(2000, 1, 29),
             Utc.ymd(2000, 2, 29),
             Utc.ymd(2002, 1, 29),
-            Utc.ymd(2004, 1, 29),
         ];
 
         assert_eq!(frequency.get_payment_dates(start, None), dates);
     }
 
     #[test]
-    fn get_payment_days_yearly_odd_years() {
-        let frequency = Frequency::Yearly(2, vec![1, 2], None, None);
-        let start = Utc.ymd(2001, 1, 1);
+    fn get_payment_dates_yearly_period_end() {
+        let frequency = Frequency::Yearly(1, vec![1], None, None);
+        let start = Utc.ymd(2000, 1, 1);
         let dates = vec![
+            Utc.ymd(2000, 1, 1),
             Utc.ymd(2001, 1, 1),
+            Utc.ymd(2002, 1, 1),
+            Utc.ymd(2003, 1, 1),
+        ];
+
+        assert_eq!(frequency.get_payment_dates(start, None), dates);
+    }
+
+    #[test]
+    fn get_payment_dates_yearly_odd_years() {
+        let frequency = Frequency::Yearly(2, vec![1, 2], None, None);
+        let start = Utc.ymd(2001, 2, 1);
+        let dates = vec![
             Utc.ymd(2001, 2, 1),
             Utc.ymd(2003, 1, 1),
             Utc.ymd(2003, 2, 1),
