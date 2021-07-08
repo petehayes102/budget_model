@@ -1,5 +1,6 @@
 use crate::{frequency::Frequency, CurrencyValue};
 use chrono::{Date, Duration, Utc};
+use log::{debug, error};
 use thiserror::Error;
 
 /// The daily amount to contribute to an upcoming payment
@@ -114,10 +115,15 @@ fn naive_contribution(
     start_date: Date<Utc>,
     end_date: Option<Date<Utc>>,
 ) -> Result<Contribution, ContributionError> {
+    debug!("evaluating contribution for {}", frequency);
+
     // If there aren't any payments, there shouldn't be a `Contribution`
     if payments.is_empty() {
+        error!("no payments found for this contribution");
         return Err(ContributionError::NoPayments);
     }
+
+    debug!("assuming payments on these dates: {:?}", payments);
 
     // Setup a fixed end date that is either the user defined date, or the last day of
     // the period. Note we need to subtract 1 day as we want the *last* day of the period
@@ -129,11 +135,22 @@ fn naive_contribution(
     // Note we add a day here as we are calculating length, not difference
     let length = period_end - start_date + Duration::days(1);
 
+    debug!(
+        "assuming contribution starts on {} and {}",
+        start_date,
+        match end_date {
+            Some(e) => format!("ends on {}", e),
+            None => format!("the period ends on {}", period_end),
+        }
+    );
+
     // For these algorithms to work, we need an ordered list
     payments.sort_unstable();
 
     // Make sure we never process payments beyond the start and end bounds
     if payments.first() < Some(&start_date) {
+        error!("the first payment occurs before the start date");
+
         return Err(ContributionError::PaymentOutOfBounds(
             start_date,
             period_end,
@@ -141,6 +158,8 @@ fn naive_contribution(
         ));
     } else if let Some(end) = end_date {
         if payments.last() > Some(&end) {
+            error!("the last payment occurs after the end date");
+
             return Err(ContributionError::PaymentOutOfBounds(
                 start_date,
                 end,
@@ -152,6 +171,15 @@ fn naive_contribution(
     // Calculate contribution amounts
     let total = CurrencyValue(**value * payments.len() as i64);
     let (regular, last) = calculate_for_duration(&total, length);
+
+    debug!(
+        "assuming the contribution has a regular contribution of ${}{}",
+        f64::from(regular),
+        match last {
+            Some(l) => format!(" and a final contribution of ${}", f64::from(l)),
+            None => String::new(),
+        }
+    );
 
     // If final contribution equals zero, it means that we've accumulated money too
     // quickly. If regular payment equals zero (and we have a fixed end date), then our
@@ -176,12 +204,19 @@ fn naive_contribution(
 
     // If every day in period has a payment, we don't need to modify the start date
     if payments.len() as i64 == length.num_days() {
-        return Ok(Contribution {
+        let c = Contribution {
             regular: regular.into(),
             last: last.map(|l| l.into()),
             start_date,
             end_date,
-        });
+        };
+
+        debug!(
+            "every day in this period has a payment - finalise contribution: {:?}",
+            c
+        );
+
+        return Ok(c);
     }
 
     // If there is no payment on the last day, we will end up accumulating contributions
@@ -192,6 +227,11 @@ fn naive_contribution(
         if end_date.is_some() {
             let last = *payments.last().unwrap();
 
+            debug!(
+                "there must be a payment on the last day - shift it to the final payment date: {}",
+                last
+            );
+
             return naive_contribution(value, frequency, payments, start_date, Some(last));
         }
         // If no end date exists, rotate the period to the second payment
@@ -199,6 +239,12 @@ fn naive_contribution(
             let first = payments.remove(0);
             let new_start = first.succ();
             payments.push(first + length);
+
+            debug!(
+                "there must be a payment on the last day - move first payment ({}) to the end ({})",
+                first,
+                first + length
+            );
 
             return naive_contribution(value, frequency, payments, new_start, None);
         }
@@ -209,6 +255,8 @@ fn naive_contribution(
     // the period has a payment, we will end up with a surplus. Thus today cannot be the
     // start date.
     if payments.first().unwrap() == &start_date {
+        debug!("there must not be a payment on the first day - skip today for this contribution");
+
         let first = payments.remove(0);
 
         // If there is no end date, we have an infinitely recurring period. This means
@@ -233,8 +281,8 @@ fn naive_contribution(
 
         // If this is the last payment, swap the regular contribution for the final one
         if Some(payment) == payments.last() {
-            if let Some(l) = last.as_ref() {
-                acc += **l - *regular;
+            if let Some(l) = last {
+                acc += *l - *regular;
             }
         }
 
@@ -247,18 +295,33 @@ fn naive_contribution(
         prev_payment = payment;
     }
 
-    // Handle broken contribution by iterating the start date until we find a sustainable
-    // date. Note that we don't shift any payment dates here. If we had a payment today,
-    // it would be caught by earlier start date checks and handled there.
+    // If acc is negative, it means that this contribution could not cover all payments.
+    // Iterate the start date until we find a sustainable date. Note that we don't shift
+    // any payment dates here. If we had a payment today, it would be caught by earlier
+    // start date checks and handled there.
     if acc < 0 {
+        debug!("this contribution did not cover all payments - skip today for this contribution");
+
         naive_contribution(value, frequency, payments, start_date.succ(), end_date)
     } else {
-        Ok(Contribution {
+        // If acc > 0, our algorithm allowed a surplus-generating contribution to pass
+        // through. Therefore our algorithm is fundamentally broken and cannot be
+        // trusted, so panicking is appropriate.
+        assert!(acc == 0);
+
+        let c = Contribution {
             regular: regular.into(),
             last: last.map(|l| l.into()),
             start_date,
             end_date,
-        })
+        };
+
+        debug!(
+            "this contribution covers all payments - finalise contribution: {:?}",
+            c
+        );
+
+        Ok(c)
     }
 }
 

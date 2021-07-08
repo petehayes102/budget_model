@@ -1,3 +1,5 @@
+use std::fmt::{Display, Error, Formatter};
+
 use chrono::{Date, Datelike, Duration, LocalResult, TimeZone, Utc};
 
 /// This constant represents the shortest number of days that is guaranteed to be
@@ -11,6 +13,7 @@ const MONTH_LENGTHS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
 const MONTH_LENGTHS_LEAP: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 /// Records the recurrence of a transaction
+#[derive(Debug)]
 pub enum Frequency {
     Once,
     Daily(u32),                              // Every n days
@@ -21,6 +24,7 @@ pub enum Frequency {
     Yearly(u32, Vec<u32>, Option<u32>, Option<FrequencyMonthDay>),
 }
 
+#[derive(Debug)]
 pub enum FrequencyMonthDay {
     Monday,
     Tuesday,
@@ -183,6 +187,108 @@ impl Frequency {
     }
 }
 
+impl Display for Frequency {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        match *self {
+            Frequency::Once => write!(f, "single payment"),
+            Frequency::Daily(n) => {
+                if n == 1 {
+                    write!(f, "daily payments")
+                } else {
+                    write!(f, "payments every {} days", n)
+                }
+            }
+            Frequency::Weekly(n, ref w) => {
+                let days = w
+                    .iter()
+                    .map(|d| match *d {
+                        1 => "Monday",
+                        2 => "Tuesday",
+                        3 => "Wednesday",
+                        4 => "Thursday",
+                        5 => "Friday",
+                        6 => "Saturday",
+                        7 => "Sunday",
+                        _ => unreachable!(), // only 7 days in a week!
+                    })
+                    .map(|d| d.to_owned())
+                    .reduce(|a, b| a + ", " + &b)
+                    .expect("dates vector is empty");
+
+                if n == 1 {
+                    write!(f, "weekly payments on {}", days)
+                } else {
+                    write!(f, "payments every {} weeks on {}", n, days)
+                }
+            }
+            Frequency::MonthlyDate(n, ref m) => {
+                let dates = m
+                    .iter()
+                    .map(|d| format!("{}", d))
+                    .map(|d| {
+                        if d.ends_with("11") || d.ends_with("12") || d.ends_with("13") {
+                            "th"
+                        } else if d.ends_with("1") {
+                            "st"
+                        } else if d.ends_with("2") {
+                            "nd"
+                        } else if d.ends_with("3") {
+                            "rd"
+                        } else {
+                            "th"
+                        }
+                    })
+                    .map(|d| d.to_owned())
+                    .reduce(|a, b| a + ", " + &b)
+                    .expect("dates vector is empty");
+                if n == 1 {
+                    write!(f, "monthly payments on {}", dates)
+                } else {
+                    write!(f, "payments every {} months on {}", n, dates)
+                }
+            }
+            Frequency::MonthlyDay(n, nth, ref day) => {
+                let nth_str = nth_to_str(nth);
+
+                if n == 1 {
+                    write!(f, "monthly payments on the {} {}", nth_str, day)
+                } else {
+                    write!(f, "payments every {} months on the {} {}", n, nth_str, day)
+                }
+            }
+            Frequency::Yearly(n, ref m, Some(nth), Some(ref day)) => {
+                let nth_str = nth_to_str(nth);
+                let months = months_to_str(m);
+
+                if n == 1 {
+                    write!(
+                        f,
+                        "yearly payments in {}, on the {} {}",
+                        months, nth_str, day
+                    )
+                } else {
+                    write!(
+                        f,
+                        "payments every {} years, in {}, on the {} {}",
+                        n, months, nth_str, day
+                    )
+                }
+            }
+            Frequency::Yearly(n, ref months, None, None) => {
+                let months = months_to_str(months);
+
+                if n == 1 {
+                    write!(f, "yearly payments in {}", months)
+                } else {
+                    write!(f, "payments every {} years in {}", n, months)
+                }
+            }
+            // Any other permutations of `Yearly` are not allowed
+            Frequency::Yearly(_, _, _, _) => unreachable!(),
+        }
+    }
+}
+
 impl FrequencyMonthDay {
     fn get_day_of_week(&self) -> u32 {
         match *self {
@@ -340,6 +446,23 @@ impl FrequencyMonthDay {
     }
 }
 
+impl Display for FrequencyMonthDay {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        match *self {
+            FrequencyMonthDay::Monday => write!(f, "Monday"),
+            FrequencyMonthDay::Tuesday => write!(f, "Tuesday"),
+            FrequencyMonthDay::Wednesday => write!(f, "Wednesday"),
+            FrequencyMonthDay::Thursday => write!(f, "Thursday"),
+            FrequencyMonthDay::Friday => write!(f, "Friday"),
+            FrequencyMonthDay::Saturday => write!(f, "Saturday"),
+            FrequencyMonthDay::Sunday => write!(f, "Sunday"),
+            FrequencyMonthDay::Day => write!(f, "day"),
+            FrequencyMonthDay::Weekday => write!(f, "week day"),
+            FrequencyMonthDay::Weekend => write!(f, "weekend"),
+        }
+    }
+}
+
 // Where we recurse over months or years, we have to handle different period lengths. For
 // example, January has 31 days, February has 28 days (but 29 on a leap year), and April
 // has 30 days. In order to calculate a single daily contribution that handles all this
@@ -405,6 +528,43 @@ fn increment_to_weekday(date: Date<Utc>, mut day: u32, interval: Duration) -> Da
     // Increment date to match closest week day
     let seek_duration = Duration::days((day - weekday) as i64);
     date + seek_duration
+}
+
+// Convert an 'nth' number to a string for display purposes
+fn nth_to_str(nth: u32) -> &'static str {
+    match nth {
+        0 => "last",
+        1 => "first",
+        2 => "second",
+        3 => "third",
+        4 => "fourth",
+        5 => "fifth",
+        _ => unreachable!(), // maximum of 5 weeks in a month
+    }
+}
+
+// Convert a vector of month integers to a string for display purposes
+fn months_to_str(months: &Vec<u32>) -> String {
+    months
+        .iter()
+        .map(|m| match *m {
+            1 => "January",
+            2 => "February",
+            3 => "March",
+            4 => "April",
+            5 => "May",
+            6 => "June",
+            7 => "July",
+            8 => "August",
+            9 => "September",
+            10 => "October",
+            11 => "November",
+            12 => "December",
+            _ => unreachable!(), // only 12 months in a year!
+        })
+        .map(|d| d.to_owned())
+        .reduce(|a, b| a + ", " + &b)
+        .expect("dates vector is empty")
 }
 
 #[cfg(test)]
