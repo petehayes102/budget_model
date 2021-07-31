@@ -81,10 +81,14 @@ pub(super) fn calculate(
         // Remove all payments covered by above contribution
         payments.retain(|p| *p < contribution.start_date);
 
-        // Set end_date to the current start_date. This allows us to measure the
-        // difference between the user-defined start date and the adjusted start date.
-        // If there is a difference, we should setup a new contribution.
-        end_date = Some(contribution.start_date);
+        // Set start_date to `now`. This allows us to make the most of any lead time in
+        // contributing to the initial payment/s.
+        start_date = now;
+
+        // Set end_date to the day before the current start date. This allows us to
+        // measure the difference between the user-defined start date and the adjusted
+        // start date. If there is a difference, we should setup a new contribution.
+        end_date = Some(contribution.start_date.pred());
 
         // Insert this contribution at the beginning of the vector. Each successive loop
         // operates on an earlier contribution, so this keeps the vector ordered
