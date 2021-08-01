@@ -9,6 +9,8 @@ readme = "README.md"
 
 [dependencies]
 chrono = "0.4"
+rust_decimal = "1.15"
+rust_decimal_macros = "1.15"
 log = "0.4"
 thiserror = "1.0"
 

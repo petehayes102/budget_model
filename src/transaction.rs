@@ -1,9 +1,10 @@
 use crate::{
     contribution::{calculate, Contribution, ContributionError},
     frequency::Frequency,
-    TransactionMatcher, TransactionValue,
+    TransactionMatcher, TransactionValue, CURRENCY_PRECISION,
 };
 use chrono::{Date, Utc};
+use rust_decimal::Decimal;
 use thiserror::Error;
 
 // This represents the maximum number of days that a time span can be.
@@ -30,10 +31,12 @@ pub struct Transaction {
 
 #[derive(Error, Debug, PartialEq)]
 pub enum TransactionError {
+    #[error("could not calculate contributions: {0}")]
+    Contribution(#[from] ContributionError),
+    #[error("currency values cannot have more than 2 decimal places: {0}")]
+    CurrencyPrecision(Decimal),
     #[error("date ranges greater than 10 years are unsupported")]
     ExcessiveDateRange,
-    #[error("could not calculate contributions")]
-    Contribution(#[from] ContributionError),
 }
 
 impl Transaction {
@@ -54,10 +57,15 @@ impl Transaction {
 
         let v = match value {
             TransactionValue::Fixed(v) => v,
-            TransactionValue::Variable(v, _) => v,
+            TransactionValue::Variable(_, v) => v,
         };
 
-        let contributions = calculate(&v, &frequency, start_date, end_date, None)?;
+        // Check that we have a valid currency value
+        if v.round_dp(CURRENCY_PRECISION) != v {
+            return Err(TransactionError::CurrencyPrecision(v));
+        }
+
+        let contributions = calculate(v, &frequency, start_date, end_date, None)?;
 
         Ok(Transaction {
             matcher,
@@ -74,18 +82,33 @@ impl Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CurrencyValue;
-    use chrono::TimeZone;
+    use chrono::{Datelike, TimeZone};
+    use rust_decimal_macros::dec;
 
     #[test]
-    fn new_transaction_model_excessive_date_range() {
+    fn new_transaction_excessive_date_range() {
         let result = Transaction::new(
             TransactionMatcher::default(),
-            TransactionValue::Fixed(CurrencyValue(0)),
+            TransactionValue::Fixed(dec!(0.0)),
             Frequency::Once,
             Utc.ymd(2000, 1, 1),
             Some(Utc.ymd(3000, 1, 2)),
         );
         assert_eq!(result.err(), Some(TransactionError::ExcessiveDateRange));
+    }
+
+    #[test]
+    fn new_transaction_ok() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let start_date = Utc::today();
+        let result = Transaction::new(
+            TransactionMatcher::default(),
+            TransactionValue::Fixed(dec!(0.01)),
+            Frequency::Weekly(1, vec![start_date.weekday().number_from_monday()]),
+            start_date,
+            None,
+        );
+        assert!(result.is_ok());
     }
 }
