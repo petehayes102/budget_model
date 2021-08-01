@@ -42,10 +42,7 @@ impl Frequency {
     pub fn get_period_length(&self) -> Duration {
         match *self {
             Frequency::Once => Duration::days(1),
-            // Note that we add 1 to days as a "2 day" frequency means "every second day".
-            // Thus, days 1 and 3. This actually a 3 day period, when you include the
-            // start day.
-            Frequency::Daily(days) => Duration::days((days + 1) as i64),
+            Frequency::Daily(days) => Duration::days((days) as i64),
             Frequency::Weekly(weeks, _) => Duration::weeks(weeks as i64),
             Frequency::MonthlyDate(months, _) | Frequency::MonthlyDay(months, _, _) => {
                 // The period length must be units of `MACRO_PERIOD` in order to handle
@@ -69,12 +66,9 @@ impl Frequency {
 
         match *self {
             Frequency::Once => vec![start.to_owned()],
-            Frequency::Daily(days) => {
-                let interval = Duration::days(days as i64);
-                get_dates_for_interval(interval, start, end)
-            }
-            Frequency::Weekly(weeks, ref days) => {
-                let interval = Duration::weeks(weeks as i64);
+            Frequency::Daily(_) => get_dates_for_interval(self.get_period_length(), start, end),
+            Frequency::Weekly(_, ref days) => {
+                let interval = self.get_period_length();
 
                 // If start date's day (e.g. Saturday) is greater than all `days`, the
                 // period will start next week. Otherwise, the period starts this week,
@@ -581,7 +575,7 @@ mod tests {
     #[test]
     fn get_period_length_daily() {
         let freq = Frequency::Daily(4);
-        assert_eq!(freq.get_period_length(), Duration::days(5));
+        assert_eq!(freq.get_period_length(), Duration::days(4));
     }
 
     #[test]
@@ -890,7 +884,7 @@ mod tests {
     fn get_payment_dates_daily_no_end_date() {
         let frequency = Frequency::Daily(10);
         let start = Utc.ymd(2000, 4, 1);
-        let days = vec![start, Utc.ymd(2000, 4, 11)];
+        let days = vec![start];
 
         assert_eq!(frequency.get_payment_dates(start, None), days);
     }
