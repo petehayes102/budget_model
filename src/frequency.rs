@@ -62,7 +62,7 @@ impl Frequency {
         // inclusion of the first day of next period in this period. For example, Monday
         // + 1 week = Monday. However the _end_ of this period is *Sunday*.
         let period_end = start.pred() + self.get_period_length();
-        let end = end.unwrap_or_else(|| period_end);
+        let end = end.unwrap_or(period_end);
 
         match *self {
             Frequency::Once => vec![start.to_owned()],
@@ -222,11 +222,11 @@ impl Display for Frequency {
                     .map(|d| {
                         if d.ends_with("11") || d.ends_with("12") || d.ends_with("13") {
                             "th"
-                        } else if d.ends_with("1") {
+                        } else if d.ends_with('1') {
                             "st"
-                        } else if d.ends_with("2") {
+                        } else if d.ends_with('2') {
                             "nd"
-                        } else if d.ends_with("3") {
+                        } else if d.ends_with('3') {
                             "rd"
                         } else {
                             "th"
@@ -538,7 +538,7 @@ fn nth_to_str(nth: u32) -> &'static str {
 }
 
 // Convert a vector of month integers to a string for display purposes
-fn months_to_str(months: &Vec<u32>) -> String {
+fn months_to_str(months: &[u32]) -> String {
     months
         .iter()
         .map(|m| match *m {

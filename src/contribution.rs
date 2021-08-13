@@ -51,7 +51,7 @@ pub(super) fn calculate(
     mut end_date: Option<Date<Utc>>,
     now: Option<Date<Utc>>, // This allows overriding the current time for testing
 ) -> Result<Vec<Contribution>, ContributionError> {
-    let now = now.unwrap_or(Utc::today());
+    let now = now.unwrap_or_else(Utc::today);
 
     // We don't allow contributions that start in the past
     if now > start_date {
@@ -76,7 +76,7 @@ pub(super) fn calculate(
     let mut contributions = Vec::new();
 
     // Recurse over `naive_contribution` until we have contributions for every payment
-    while payments.len() > 0 {
+    while !payments.is_empty() {
         // This sucks but we've got to create a clone of payments here.
         // `naive_contribution` mutates this vector, which will make it impossible to
         // track payments earlier than the start date, which can be incremented for fit.
@@ -84,7 +84,7 @@ pub(super) fn calculate(
 
         // Create a new Contribution from naive dates
         let contribution =
-            naive_contribution(value, &frequency, payments_c, start_date, end_date, None)?;
+            naive_contribution(value, frequency, payments_c, start_date, end_date, None)?;
 
         // Remove all payments covered by above contribution
         payments.retain(|p| *p < contribution.start_date);
@@ -376,7 +376,7 @@ fn naive_contribution(
     // date, the last thing we can try is reducing the number of payments until we reach
     // a sustainable point...or we run out of payments.
     else if cumulative_delta < Decimal::ZERO {
-        if payment_dates.len() > 0 {
+        if !payment_dates.is_empty() {
             let first = payment_dates.remove(0);
 
             debug!(
