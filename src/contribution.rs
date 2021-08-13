@@ -23,6 +23,10 @@ pub enum ContributionError {
     PaymentOutOfBounds(Date<Utc>, Date<Utc>, Date<Utc>), // start, end, oob
     #[error("contribution is approaching zero")]
     ApproachingZero,
+    #[error("could not resolve contribution to cover all payments")]
+    Unresolvable,
+    #[error("too much recursion trying to find a sustainable contribution")]
+    TooMuchRecursion,
 }
 
 // impl Contribution {
@@ -79,10 +83,11 @@ pub(super) fn calculate(
         let payments_c = payments.clone();
 
         // Create a new Contribution from naive dates
-        let contribution = naive_contribution(value, &frequency, payments_c, start_date, end_date)?;
+        let contribution =
+            naive_contribution(value, &frequency, payments_c, start_date, end_date, None)?;
 
         // Remove all payments covered by above contribution
-        payments.retain(|p| *p < contribution.start_date);
+        payments.retain(|p| *p <= contribution.start_date);
 
         // Set start_date to `now`. This allows us to make the most of any lead time in
         // contributing to the initial payment/s.
@@ -91,7 +96,7 @@ pub(super) fn calculate(
         // Set end_date to the day before the current start date. This allows us to
         // measure the difference between the user-defined start date and the adjusted
         // start date. If there is a difference, we should setup a new contribution.
-        end_date = Some(contribution.start_date.pred());
+        end_date = Some(contribution.start_date);
 
         // Insert this contribution at the beginning of the vector. Each successive loop
         // operates on an earlier contribution, so this keeps the vector ordered
@@ -121,7 +126,15 @@ fn naive_contribution(
     mut payment_dates: Vec<Date<Utc>>,
     start_date: Date<Utc>,
     end_date: Option<Date<Utc>>,
+    mut final_date: Option<Date<Utc>>,
 ) -> Result<Contribution, ContributionError> {
+    // If the start date goes beyond the final date, abort to prevent infinite loop
+    if let Some(f_date) = final_date {
+        if start_date > f_date {
+            return Err(ContributionError::TooMuchRecursion);
+        }
+    }
+
     debug!("evaluating contribution for {}", frequency);
 
     // If there aren't any payments, there shouldn't be a `Contribution`
@@ -130,17 +143,11 @@ fn naive_contribution(
         return Err(ContributionError::NoPayments);
     }
 
-    debug!("assuming payments on these dates: {:?}", payment_dates);
-
     // Setup a fixed end date that is either the user defined date, or the last day of
     // the period. Note we need to subtract 1 day as we want the *last* day of the period
     // rather than the first day of the next period.
     let period_end =
         end_date.unwrap_or(start_date + frequency.get_period_length() - Duration::days(1));
-
-    // Define period length
-    // Note we add a day here as we are calculating length, not difference
-    let length = period_end - start_date + Duration::days(1);
 
     debug!(
         "assuming contribution starts on {} and {}",
@@ -150,6 +157,17 @@ fn naive_contribution(
             None => format!("the period ends on {}", period_end),
         }
     );
+
+    debug!("assuming payments on these dates: {:?}", payment_dates);
+
+    // Assign final date to prevent infinite looping
+    if final_date.is_none() {
+        debug!("setting recursion limit date of {}", period_end);
+        final_date = Some(period_end);
+    }
+
+    // Define period length
+    let length = period_end - start_date;
 
     // For these algorithms to work, we need an ordered list
     payment_dates.sort_unstable();
@@ -175,23 +193,11 @@ fn naive_contribution(
         }
     }
 
-    // Calculate contribution amounts
-    let (regular, last) = calculate_for_duration(payment, payment_dates.len() as u64, length)?;
-
-    debug!(
-        "assuming the contribution has a regular contribution of ${}{}",
-        regular,
-        match last {
-            Some(l) => format!(" and a final contribution of ${}", l),
-            None => String::new(),
-        }
-    );
-
-    // If every day in period has a payment, we don't need to modify the start date
+    // If every day in period has a payment, this contribution is valid
     if payment_dates.len() as i64 == length.num_days() {
         let c = Contribution {
-            regular: regular.into(),
-            last: last.map(|l| l.into()),
+            regular: payment,
+            last: None,
             start_date,
             end_date,
         };
@@ -203,6 +209,18 @@ fn naive_contribution(
 
         return Ok(c);
     }
+
+    // Calculate contribution amounts
+    let (regular, last) = calculate_for_duration(payment, payment_dates.len() as u64, length)?;
+
+    debug!(
+        "assuming the contribution has a regular value of ${}{}",
+        regular,
+        match last {
+            Some(l) => format!(" and a final value of ${}", l),
+            None => String::new(),
+        }
+    );
 
     // If there is no payment on the last day, we will end up accumulating contributions
     // after the last payment. This means that we won't actually cover the last payment
@@ -217,7 +235,14 @@ fn naive_contribution(
                 last
             );
 
-            return naive_contribution(payment, frequency, payment_dates, start_date, Some(last));
+            return naive_contribution(
+                payment,
+                frequency,
+                payment_dates,
+                start_date,
+                Some(last),
+                final_date,
+            );
         }
         // If no end date exists, rotate the period to the second payment
         else {
@@ -231,7 +256,14 @@ fn naive_contribution(
                 first + length
             );
 
-            return naive_contribution(payment, frequency, payment_dates, new_start, None);
+            return naive_contribution(
+                payment,
+                frequency,
+                payment_dates,
+                new_start,
+                None,
+                final_date,
+            );
         }
     }
 
@@ -251,93 +283,117 @@ fn naive_contribution(
             payment_dates.push(first + length);
         }
 
-        return naive_contribution(payment, frequency, payment_dates, start_date, end_date);
-    }
-
-    // Loop through each payment to ensure that contributions keep up with the payments.
-    // If not, shift the start date and try again.
-    let mut acc = Decimal::ZERO;
-    let mut prev_date = &start_date;
-    for date in payment_dates.iter() {
-        let duration = *date - *prev_date;
-        let days = Decimal::from(duration.num_days());
-
-        // Calculate current accumulated balance
-        acc += days * regular - payment;
-
-        // If this is the last payment, swap the regular contribution for the final one
-        match last {
-            Some(l) if payment_dates.last() == Some(date) => {
-                acc += l - regular;
-
-                trace!(
-                    "test contribution [{} => {}]: {} days * regular {} + last {} - payment {} = {}",
-                    prev_date,
-                    date,
-                    days - Decimal::ONE,
-                    regular,
-                    l,
-                    payment,
-                    acc
-                );
-            }
-            _ => {
-                trace!(
-                    "test contribution [{} => {}]: {} days * {} (regular) - {} (payment) = {}",
-                    prev_date,
-                    date,
-                    duration.num_days(),
-                    regular,
-                    payment,
-                    acc
-                );
-            }
-        }
-
-        // If we go below zero, this contribution and start_date combination are not
-        // sustainable.
-        if acc < Decimal::ZERO {
-            break;
-        }
-
-        prev_date = date;
-    }
-
-    // If acc is negative, it means that this contribution could not cover all payments.
-    // Iterate the start date until we find a sustainable date. Note that we don't shift
-    // any payment dates here. If we had a payment today, it would be caught by earlier
-    // start date checks and handled there.
-    if acc < Decimal::ZERO {
-        debug!("this contribution did not cover all payments - skip today for this contribution");
-
-        naive_contribution(
+        return naive_contribution(
             payment,
             frequency,
             payment_dates,
-            start_date.succ(),
-            end_date,
-        )
-    } else {
-        println!("Acc: {}", acc);
-        // If acc > 0, our algorithm allowed a surplus-generating contribution to pass
-        // through. Therefore our algorithm is fundamentally broken and cannot be
-        // trusted, so panicking is appropriate.
-        assert!(acc == Decimal::ZERO);
-
-        let c = Contribution {
-            regular,
-            last,
             start_date,
             end_date,
-        };
+            final_date,
+        );
+    }
 
-        debug!(
-            "this contribution covers all payments - finalise contribution: {:?}",
-            c
+    // Ensure that the duration between each payment is sufficient for accumulated
+    // contributions to cover it.
+    let min_length = ((payment - last.unwrap_or(regular)) / regular + Decimal::ONE).round_dp(23);
+    let mut lag_date = start_date;
+    let mut first_positive_date = None;
+    let mut cumulative_delta = Decimal::ZERO;
+    for date in payment_dates.iter() {
+        // Calculate number of days between payments
+        let duration = *date - lag_date;
+        let days = Decimal::from(duration.num_days());
+
+        // Calculate contribution length delta
+        let delta = days - min_length;
+
+        trace!(
+            "contribution delta from {} to {}: {} - {} = {} (cumulative: {})",
+            lag_date,
+            date,
+            days,
+            min_length,
+            delta,
+            cumulative_delta + delta
         );
 
-        Ok(c)
+        // Cache first positive date if we need to wind forward
+        if delta <= Decimal::ZERO {
+            first_positive_date = None;
+        } else if first_positive_date.is_none() {
+            first_positive_date = Some(lag_date);
+        }
+
+        // If the cumulative delta turns from negative to positive, the lag date is a
+        // good candidate for a sustainable contribution.
+        if cumulative_delta < Decimal::ZERO && cumulative_delta + delta >= Decimal::ZERO {
+            break;
+        }
+
+        // Update tracking vars
+        lag_date = *date;
+        cumulative_delta += delta;
     }
+
+    // Handle a suggested new start date
+    if let Some(date) = first_positive_date {
+        debug!(
+            "the contribution does not cover all payments; choosing next viable date: {}",
+            date
+        );
+
+        // Shift prior payment dates
+        while payment_dates.first() <= Some(&date) {
+            let first = payment_dates.remove(0);
+            // Only append date if we have an infinite recursion
+            if end_date.is_none() {
+                payment_dates.push(first + length);
+            }
+        }
+
+        return naive_contribution(
+            payment,
+            frequency,
+            payment_dates,
+            date,
+            end_date,
+            final_date,
+        );
+    }
+    // If our contribution ends with a negative delta and there's no suggested start
+    // date, the last thing we can try is reducing the number of payments until we reach
+    // a sustainable point...or we run out of payments.
+    else if cumulative_delta < Decimal::ZERO {
+        if payment_dates.len() > 0 {
+            let first = payment_dates.remove(0);
+
+            debug!(
+                "the contribution does not cover all payments; remove the first payment: {}",
+                first
+            );
+
+            return naive_contribution(
+                payment,
+                frequency,
+                payment_dates,
+                first,
+                end_date,
+                final_date,
+            );
+        } else {
+            return Err(ContributionError::Unresolvable);
+        }
+    }
+
+    let contribution = Contribution {
+        regular,
+        last,
+        start_date,
+        end_date,
+    };
+    debug!("finalising contribution: {:?}", contribution);
+
+    Ok(contribution)
 }
 
 // Calculate the contribution amounts for a value and duration
@@ -354,7 +410,7 @@ fn calculate_for_duration(
     let days = Decimal::from(duration.num_days());
 
     // Calculate the regular contribution
-    let regular = (total / days).round_dp(2);
+    let regular = total / days;
 
     // Given the potential rounding of the regular contribution, we may need a separate
     // final contribution to handle the rounding error.
@@ -441,7 +497,7 @@ mod tests {
         let payment = Utc.ymd(2000, 1, 1);
         let payments = vec![payment];
         let contribution =
-            naive_contribution(Decimal::ONE, &Frequency::Once, payments, start, None);
+            naive_contribution(Decimal::ONE, &Frequency::Once, payments, start, None, None);
         assert_eq!(
             contribution.err(),
             Some(ContributionError::PaymentOutOfBounds(
@@ -458,8 +514,14 @@ mod tests {
         let end = Utc.ymd(2000, 1, 3);
         let payment = Utc.ymd(2000, 1, 4);
         let payments = vec![payment];
-        let contribution =
-            naive_contribution(Decimal::ONE, &Frequency::Once, payments, start, Some(end));
+        let contribution = naive_contribution(
+            Decimal::ONE,
+            &Frequency::Once,
+            payments,
+            start,
+            Some(end),
+            None,
+        );
         assert_eq!(
             contribution.err(),
             Some(ContributionError::PaymentOutOfBounds(start, end, payment))
@@ -473,6 +535,7 @@ mod tests {
             &Frequency::Once,
             Vec::new(),
             Utc.ymd(2000, 1, 2),
+            None,
             None,
         );
         assert_eq!(contribution.err(), Some(ContributionError::NoPayments));
@@ -495,6 +558,7 @@ mod tests {
             payments,
             start,
             Some(end),
+            None,
         );
         assert_eq!(
             contribution,
@@ -518,6 +582,7 @@ mod tests {
             payments,
             start,
             Some(end),
+            None,
         );
         assert_eq!(
             contribution,
@@ -534,8 +599,14 @@ mod tests {
     fn naive_contribution_start_no_end() {
         let start = Utc.ymd(2000, 1, 1);
         let payments = vec![start];
-        let contribution =
-            naive_contribution(Decimal::ONE, &Frequency::Daily(2), payments, start, None);
+        let contribution = naive_contribution(
+            Decimal::ONE,
+            &Frequency::Daily(2),
+            payments,
+            start,
+            None,
+            None,
+        );
         assert_eq!(
             contribution,
             Ok(Contribution {
@@ -549,6 +620,7 @@ mod tests {
 
     #[test]
     fn naive_contribution_end_with_date() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let start = Utc.ymd(2000, 1, 1);
         let end = Utc.ymd(2000, 1, 3);
         let pay_end = Utc.ymd(2000, 1, 2);
@@ -559,6 +631,7 @@ mod tests {
             payments,
             start,
             Some(end),
+            None,
         );
         assert_eq!(
             contribution,
@@ -584,6 +657,7 @@ mod tests {
             &Frequency::Weekly(1, vec![3, 4, 5]),
             payments,
             start,
+            None,
             None,
         );
         assert_eq!(
@@ -612,6 +686,7 @@ mod tests {
             payments,
             start,
             None,
+            None,
         );
         assert_eq!(
             contribution,
@@ -637,6 +712,7 @@ mod tests {
             &Frequency::Weekly(1, vec![2, 4, 5, 7]),
             payments,
             Utc.ymd(2000, 4, 3),
+            None,
             None,
         );
         assert_eq!(
@@ -665,6 +741,7 @@ mod tests {
             payments,
             Utc.ymd(2000, 4, 3),
             None,
+            None,
         );
         assert_eq!(
             contribution,
@@ -685,6 +762,7 @@ mod tests {
             &Frequency::Weekly(1, vec![2, 6]),
             payments,
             Utc.ymd(2000, 4, 3),
+            None,
             None,
         );
         assert_eq!(
@@ -707,6 +785,7 @@ mod tests {
             payments,
             Utc.ymd(2000, 4, 3),
             None,
+            None,
         );
         assert_eq!(
             contribution,
@@ -728,6 +807,7 @@ mod tests {
             payments,
             Utc.ymd(2021, 7, 2),
             None,
+            None,
         );
         assert_eq!(
             contribution,
@@ -748,6 +828,7 @@ mod tests {
             &Frequency::Weekly(1, vec![5]),
             payments,
             Utc.ymd(2021, 7, 2),
+            None,
             None,
         );
         assert_eq!(
