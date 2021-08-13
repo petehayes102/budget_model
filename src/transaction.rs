@@ -99,8 +99,6 @@ mod tests {
 
     #[test]
     fn new_transaction_ok() {
-        let _ = env_logger::builder().is_test(true).try_init();
-
         let start_date = Utc::today();
         let result = Transaction::new(
             TransactionMatcher::default(),
