@@ -49,10 +49,9 @@ pub(super) fn calculate(
     frequency: &Frequency,
     mut start_date: Date<Utc>,
     mut end_date: Option<Date<Utc>>,
-    now: Option<Date<Utc>>, // This allows overriding the current time for testing
+    // Fixing the current date allows us to recalculate the contribution repeatably
+    now: Date<Utc>,
 ) -> Result<Vec<Contribution>, ContributionError> {
-    let now = now.unwrap_or_else(Utc::today);
-
     // We don't allow contributions that start in the past
     if now > start_date {
         return Err(ContributionError::HistoricalStartDate);
@@ -876,7 +875,7 @@ mod tests {
             &Frequency::Once,
             Utc.ymd(2000, 4, 1),
             None,
-            Some(Utc.ymd(2000, 4, 2)),
+            Utc.ymd(2000, 4, 2),
         );
 
         assert_eq!(result.err(), Some(ContributionError::HistoricalStartDate));
@@ -889,7 +888,7 @@ mod tests {
             &Frequency::Once,
             Utc.ymd(2000, 4, 2),
             None,
-            Some(Utc.ymd(2000, 4, 1)),
+            Utc.ymd(2000, 4, 1),
         );
         assert_eq!(
             contributions,
@@ -909,7 +908,7 @@ mod tests {
             &Frequency::Daily(2),
             Utc.ymd(2000, 4, 2),
             None,
-            Some(Utc.ymd(2000, 4, 1)),
+            Utc.ymd(2000, 4, 1),
         );
         assert_eq!(
             contributions,
@@ -937,7 +936,7 @@ mod tests {
             &Frequency::Daily(2),
             Utc.ymd(2000, 4, 2),
             Some(Utc.ymd(2000, 4, 4)),
-            Some(Utc.ymd(2000, 4, 2)),
+            Utc.ymd(2000, 4, 2),
         );
         assert_eq!(
             contributions,
@@ -965,7 +964,7 @@ mod tests {
             &Frequency::Daily(2),
             Utc.ymd(2000, 4, 2),
             Some(Utc.ymd(2000, 4, 4)),
-            Some(Utc.ymd(2000, 4, 1)),
+            Utc.ymd(2000, 4, 1),
         );
         assert_eq!(
             contributions,
@@ -985,7 +984,7 @@ mod tests {
             &Frequency::Once,
             Utc.ymd(2000, 4, 3),
             None,
-            Some(Utc.ymd(2000, 4, 1)),
+            Utc.ymd(2000, 4, 1),
         );
         assert_eq!(
             contributions,
@@ -1005,7 +1004,7 @@ mod tests {
             &Frequency::Yearly(1, vec![2, 8], None, None),
             Utc.ymd(2000, 1, 1),
             None,
-            Some(Utc.ymd(2000, 1, 1)),
+            Utc.ymd(2000, 1, 1),
         );
         assert_eq!(
             contributions,
@@ -1045,7 +1044,7 @@ mod tests {
             &Frequency::Yearly(2, vec![2, 8], None, None),
             Utc.ymd(2000, 1, 1),
             None,
-            Some(Utc.ymd(2000, 1, 1)),
+            Utc.ymd(2000, 1, 1),
         );
         assert_eq!(
             contributions,

@@ -1,25 +1,22 @@
 use crate::{
     contribution::{calculate, Contribution, ContributionError},
     frequency::Frequency,
-    TransactionMatcher, TransactionValue, CURRENCY_PRECISION,
+    TransactionValue, CURRENCY_PRECISION,
 };
 use chrono::{Date, Utc};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
-/// The model for a future transaction or group of transactions.
+/// The representation of a future transaction.
 ///
-/// `Transaction`s are the building blocks of a budget, and are used to track
+/// `TransactionModel`s are the building blocks of a budget, and are used to track
 /// revenues, expenses and savings over time. These models are also used to calculate the
 /// affordability of a user's finances in perpetuity.
-pub struct Transaction {
-    matcher: TransactionMatcher,
+#[derive(Debug)]
+pub struct TransactionModel {
     value: TransactionValue,
     contributions: Vec<Contribution>,
     frequency: Frequency,
-    // This is the date that the contributions were calculated from. If we lose this date
-    // then we won't be able to recalculate our contributions accurately later.
-    calculation_date: Date<Utc>,
     start_date: Date<Utc>,
     end_date: Option<Date<Utc>>,
 }
@@ -32,13 +29,19 @@ pub enum TransactionError {
     CurrencyPrecision(Decimal),
 }
 
-impl Transaction {
+impl TransactionModel {
+    /// Create a new `Transaction`.
+    ///
+    /// This function captures a `calculation_date`, which represents the date that this
+    /// `Transaction` was first calculated. This is important for recreating past
+    /// `Transaction`s accurately, as a `Transaction`'s contributions towards a future
+    /// payment will often begin on the day that the `Transaction` is calculated.
     pub fn new(
-        matcher: TransactionMatcher,
         value: TransactionValue,
         frequency: Frequency,
         start_date: Date<Utc>,
         end_date: Option<Date<Utc>>,
+        calculation_date: Option<Date<Utc>>,
     ) -> Result<Self, TransactionError> {
         let v = match value {
             TransactionValue::Fixed(v) => v,
@@ -50,14 +53,13 @@ impl Transaction {
             return Err(TransactionError::CurrencyPrecision(v));
         }
 
-        let contributions = calculate(v, &frequency, start_date, end_date, None)?;
+        let now = calculation_date.unwrap_or_else(Utc::today);
+        let contributions = calculate(v, &frequency, start_date, end_date, now)?;
 
-        Ok(Transaction {
-            matcher,
+        Ok(TransactionModel {
             value,
             contributions,
             frequency,
-            calculation_date: Utc::today(),
             start_date,
             end_date,
         })
@@ -73,11 +75,11 @@ mod tests {
     #[test]
     fn new_transaction_ok() {
         let start_date = Utc::today();
-        let result = Transaction::new(
-            TransactionMatcher::default(),
+        let result = TransactionModel::new(
             TransactionValue::Fixed(dec!(0.01)),
             Frequency::Weekly(1, vec![start_date.weekday().number_from_monday()]),
             start_date,
+            None,
             None,
         );
         assert!(result.is_ok());
