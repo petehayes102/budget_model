@@ -11,6 +11,7 @@ pub struct Contribution {
     last: Option<Decimal>,
     start_date: Date<Utc>,
     end_date: Option<Date<Utc>>,
+    period_length: Duration,
 }
 
 #[derive(Error, Debug, Eq, PartialEq)]
@@ -29,16 +30,50 @@ pub enum ContributionError {
     TooMuchRecursion,
 }
 
-// impl Contribution {
-//     /// Returns whether this `Contribution` has expired.
-//     /// If `end_date` is not set, this `Contribution` will never expire.
-//     pub fn has_expired(&self) -> bool {
-//         match self.end_date {
-//             Some(date) => date < Utc::today(),
-//             None => false,
-//         }
-//     }
-// }
+impl Contribution {
+    /// Returns whether this `Contribution` has expired.
+    /// If `end_date` is not set, this `Contribution` will never expire.
+    // pub fn has_expired(&self) -> bool {
+    //     match self.end_date {
+    //         Some(date) => date < Utc::today(),
+    //         None => false,
+    //     }
+    // }
+
+    pub fn regular_or_last(&self, date: Date<Utc>) -> Option<Decimal> {
+        let period_end = self.period_end(Some(date));
+        if date >= self.start_date {
+            if date == period_end {
+                return self.last.or(Some(self.regular));
+            } else if date < period_end {
+                return Some(self.regular);
+            }
+        }
+        None
+    }
+
+    pub fn start_date(&self) -> Date<Utc> {
+        self.start_date
+    }
+
+    pub fn period_end(&self, date: Option<Date<Utc>>) -> Date<Utc> {
+        let date = date.unwrap_or(self.start_date);
+        self.end_date.unwrap_or_else(|| {
+            // If there's no end date, roll forward to the next period end for `date`.
+            // We do this by finding the nearest multiple of `period_length`.
+            let diff = date - self.start_date + Duration::days(1);
+            let rem = Duration::days(diff.num_days() % self.period_length.num_days());
+
+            // If the given `date` is exactly divisible by our period length, we are
+            // already at the end of the period, so don't attempt to roll forward.
+            if rem.is_zero() {
+                date
+            } else {
+                date + self.period_length - rem
+            }
+        })
+    }
+}
 
 /// Returns a tuple of the regular contribution and any required onboarding amelioration.
 /// For example, if I have a new weekly payment schedule which starts in 3 days, but the
@@ -204,6 +239,7 @@ fn naive_contribution(
             last: None,
             start_date,
             end_date,
+            period_length,
         };
 
         debug!(
@@ -401,6 +437,7 @@ fn naive_contribution(
         last,
         start_date,
         end_date,
+        period_length,
     };
     debug!("finalising contribution: {:?}", contribution);
 
@@ -519,6 +556,90 @@ mod tests {
     // }
 
     #[test]
+    fn contribution_regular_or_last_regular() {
+        let c = Contribution {
+            regular: dec!(1),
+            last: None,
+            start_date: Utc.ymd(2000, 4, 1),
+            end_date: None,
+            period_length: Duration::days(2),
+        };
+        assert_eq!(c.regular_or_last(Utc.ymd(2000, 4, 2)), Some(dec!(1)));
+    }
+
+    #[test]
+    fn contribution_regular_or_last_last() {
+        let c = Contribution {
+            regular: dec!(1),
+            last: Some(dec!(2)),
+            start_date: Utc.ymd(2000, 4, 1),
+            end_date: None,
+            period_length: Duration::days(2),
+        };
+        assert_eq!(c.regular_or_last(Utc.ymd(2000, 4, 4)), Some(dec!(2)));
+    }
+
+    #[test]
+    fn contribution_regular_or_last_before() {
+        let c = Contribution {
+            regular: dec!(1),
+            last: None,
+            start_date: Utc.ymd(2000, 4, 1),
+            end_date: None,
+            period_length: Duration::days(1),
+        };
+        assert!(c.regular_or_last(Utc.ymd(2000, 3, 31)).is_none());
+    }
+
+    #[test]
+    fn contribution_regular_or_last_after() {
+        let c = Contribution {
+            regular: dec!(1),
+            last: None,
+            start_date: Utc.ymd(2000, 4, 1),
+            end_date: Some(Utc.ymd(2000, 4, 3)),
+            period_length: Duration::days(2),
+        };
+        assert!(c.regular_or_last(Utc.ymd(2000, 4, 4)).is_none());
+    }
+
+    #[test]
+    fn contribution_period_end_no_date() {
+        let c = Contribution {
+            regular: dec!(1),
+            last: None,
+            start_date: Utc.ymd(2000, 4, 1),
+            end_date: None,
+            period_length: Duration::days(2),
+        };
+        assert_eq!(c.period_end(None), Utc.ymd(2000, 4, 2));
+    }
+
+    #[test]
+    fn contribution_period_end_with_end_date() {
+        let c = Contribution {
+            regular: dec!(1),
+            last: None,
+            start_date: Utc.ymd(2000, 4, 1),
+            end_date: Some(Utc.ymd(2000, 4, 2)),
+            period_length: Duration::days(2),
+        };
+        assert_eq!(c.period_end(Some(Utc.ymd(2000, 4, 2))), Utc.ymd(2000, 4, 2));
+    }
+
+    #[test]
+    fn contribution_period_end_next_week() {
+        let c = Contribution {
+            regular: dec!(1),
+            last: None,
+            start_date: Utc.ymd(2000, 4, 1),
+            end_date: None,
+            period_length: Duration::days(2),
+        };
+        assert_eq!(c.period_end(Some(Utc.ymd(2000, 4, 7))), Utc.ymd(2000, 4, 8));
+    }
+
+    #[test]
     fn naive_contribution_start_oob() {
         let start = Utc.ymd(2000, 1, 2);
         let payment = Utc.ymd(2000, 1, 1);
@@ -594,6 +715,7 @@ mod tests {
                 last: None,
                 start_date: start,
                 end_date: Some(end),
+                period_length: Duration::days(5)
             })
         );
     }
@@ -618,6 +740,7 @@ mod tests {
                 last: None,
                 start_date: start.succ(),
                 end_date: Some(end),
+                period_length: Duration::days(2)
             })
         );
     }
@@ -641,6 +764,7 @@ mod tests {
                 last: None,
                 start_date: start.succ(),
                 end_date: None,
+                period_length: Duration::days(2)
             })
         );
     }
@@ -666,6 +790,7 @@ mod tests {
                 last: None,
                 start_date: start,
                 end_date: Some(pay_end),
+                period_length: Duration::days(2)
             })
         );
     }
@@ -693,6 +818,7 @@ mod tests {
                 last: Some(dec!(0.4285714285714285714285714284)),
                 start_date: Utc.ymd(2000, 1, 8),
                 end_date: None,
+                period_length: Duration::days(7)
             })
         );
     }
@@ -721,6 +847,7 @@ mod tests {
                 last: Some(dec!(0.5714285714285714285714285716)),
                 start_date: Utc.ymd(2000, 4, 8),
                 end_date: None,
+                period_length: Duration::days(7)
             })
         );
     }
@@ -748,6 +875,7 @@ mod tests {
                 last: Some(dec!(0.5714285714285714285714285716)),
                 start_date: Utc.ymd(2000, 4, 8),
                 end_date: None,
+                period_length: Duration::days(7)
             })
         );
     }
@@ -776,6 +904,7 @@ mod tests {
                 last: Some(dec!(0.7142857142857142857142857142)),
                 start_date: Utc.ymd(2000, 4, 7),
                 end_date: None,
+                period_length: Duration::days(7)
             })
         );
     }
@@ -798,6 +927,7 @@ mod tests {
                 last: Some(dec!(0.2857142857142857142857142858)),
                 start_date: Utc.ymd(2000, 4, 5),
                 end_date: None,
+                period_length: Duration::days(7)
             })
         );
     }
@@ -820,6 +950,7 @@ mod tests {
                 last: Some(dec!(0.2857142857142857142857142858)),
                 start_date: Utc.ymd(2000, 4, 3),
                 end_date: None,
+                period_length: Duration::days(7)
             })
         );
     }
@@ -842,6 +973,7 @@ mod tests {
                 last: Some(dec!(0.0014285714285714285714285716)),
                 start_date: Utc.ymd(2021, 7, 3),
                 end_date: None,
+                period_length: Duration::days(7)
             })
         );
     }
@@ -864,6 +996,7 @@ mod tests {
                 last: Some(dec!(0.1428571428571428571428571426)),
                 start_date: Utc.ymd(2021, 7, 3),
                 end_date: None,
+                period_length: Duration::days(7)
             })
         );
     }
@@ -896,7 +1029,8 @@ mod tests {
                 regular: dec!(0.5),
                 last: None,
                 start_date: Utc.ymd(2000, 4, 1),
-                end_date: Some(Utc.ymd(2000, 4, 2))
+                end_date: Some(Utc.ymd(2000, 4, 2)),
+                period_length: Duration::days(2)
             }])
         );
     }
@@ -917,13 +1051,15 @@ mod tests {
                     regular: dec!(0.5),
                     last: None,
                     start_date: Utc.ymd(2000, 4, 1),
-                    end_date: Some(Utc.ymd(2000, 4, 2))
+                    end_date: Some(Utc.ymd(2000, 4, 2)),
+                    period_length: Duration::days(2)
                 },
                 Contribution {
                     regular: dec!(0.5),
                     last: None,
                     start_date: Utc.ymd(2000, 4, 3),
-                    end_date: None
+                    end_date: None,
+                    period_length: Duration::days(2)
                 }
             ])
         );
@@ -945,13 +1081,15 @@ mod tests {
                     regular: Decimal::ONE,
                     last: None,
                     start_date: Utc.ymd(2000, 4, 2),
-                    end_date: Some(Utc.ymd(2000, 4, 2))
+                    end_date: Some(Utc.ymd(2000, 4, 2)),
+                    period_length: Duration::days(1)
                 },
                 Contribution {
                     regular: dec!(0.5),
                     last: None,
                     start_date: Utc.ymd(2000, 4, 3),
                     end_date: Some(Utc.ymd(2000, 4, 4)),
+                    period_length: Duration::days(2)
                 }
             ])
         );
@@ -973,6 +1111,7 @@ mod tests {
                 last: None,
                 start_date: Utc.ymd(2000, 4, 1),
                 end_date: Some(Utc.ymd(2000, 4, 4)),
+                period_length: Duration::days(4)
             }])
         );
     }
@@ -993,6 +1132,7 @@ mod tests {
                 last: Some(dec!(0.0033333333333333333333333334)),
                 start_date: Utc.ymd(2000, 4, 1),
                 end_date: Some(Utc.ymd(2000, 4, 3)),
+                period_length: Duration::days(3)
             }])
         );
     }
@@ -1013,25 +1153,29 @@ mod tests {
                     regular: dec!(0.15625),
                     last: None,
                     start_date: Utc.ymd(2000, 01, 01),
-                    end_date: Some(Utc.ymd(2000, 02, 01))
+                    end_date: Some(Utc.ymd(2000, 02, 01)),
+                    period_length: Duration::days(32)
                 },
                 Contribution {
                     regular: dec!(0.0274725274725274725274725275),
                     last: Some(dec!(0.0274725274725274725274725225)),
                     start_date: Utc.ymd(2000, 02, 02),
-                    end_date: Some(Utc.ymd(2000, 08, 01))
+                    end_date: Some(Utc.ymd(2000, 08, 01)),
+                    period_length: Duration::days(182)
                 },
                 Contribution {
                     regular: dec!(0.0273972602739726027397260274),
                     last: Some(dec!(0.027397260273972602739726024)),
                     start_date: Utc.ymd(2000, 08, 02),
-                    end_date: Some(Utc.ymd(2003, 08, 01))
+                    end_date: Some(Utc.ymd(2003, 08, 01)),
+                    period_length: Duration::days(1095)
                 },
                 Contribution {
                     regular: dec!(0.0273785078713210130047912389),
                     last: Some(dec!(0.027378507871321013004791206)),
                     start_date: Utc.ymd(2003, 08, 02),
-                    end_date: None
+                    end_date: None,
+                    period_length: Duration::days(1461)
                 }
             ])
         );
@@ -1053,25 +1197,29 @@ mod tests {
                     regular: dec!(0.15625),
                     last: None,
                     start_date: Utc.ymd(2000, 01, 01),
-                    end_date: Some(Utc.ymd(2000, 02, 01))
+                    end_date: Some(Utc.ymd(2000, 02, 01)),
+                    period_length: Duration::days(32)
                 },
                 Contribution {
                     regular: dec!(0.0274725274725274725274725275),
                     last: Some(dec!(0.0274725274725274725274725225)),
                     start_date: Utc.ymd(2000, 02, 02),
-                    end_date: Some(Utc.ymd(2000, 08, 01))
+                    end_date: Some(Utc.ymd(2000, 08, 01)),
+                    period_length: Duration::days(182)
                 },
                 Contribution {
                     regular: dec!(0.0136986301369863013698630137),
                     last: Some(dec!(0.013698630136986301369863013)),
                     start_date: Utc.ymd(2000, 08, 02),
-                    end_date: Some(Utc.ymd(2002, 08, 01))
+                    end_date: Some(Utc.ymd(2002, 08, 01)),
+                    period_length: Duration::days(730)
                 },
                 Contribution {
                     regular: dec!(0.0136892539356605065023956194),
                     last: Some(dec!(0.013689253935660506502395676)),
                     start_date: Utc.ymd(2002, 08, 02),
-                    end_date: None
+                    end_date: None,
+                    period_length: Duration::days(1461)
                 }
             ])
         );

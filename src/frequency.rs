@@ -39,7 +39,7 @@ pub enum FrequencyMonthDay {
 }
 
 impl Frequency {
-    pub fn get_period_length(&self) -> Duration {
+    pub(crate) fn get_period_length(&self) -> Duration {
         match *self {
             Frequency::Once => Duration::days(1),
             Frequency::Daily(days) => Duration::days((days) as i64),
@@ -57,7 +57,11 @@ impl Frequency {
         }
     }
 
-    pub fn get_payment_dates(&self, start: Date<Utc>, end: Option<Date<Utc>>) -> Vec<Date<Utc>> {
+    pub(crate) fn get_payment_dates(
+        &self,
+        start: Date<Utc>,
+        end: Option<Date<Utc>>,
+    ) -> Vec<Date<Utc>> {
         // Set period end to yesterday + period length. We do this to prevent the
         // inclusion of the first day of next period in this period. For example, Monday
         // + 1 week = Monday. However the _end_ of this period is *Sunday*.
