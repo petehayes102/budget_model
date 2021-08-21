@@ -2,9 +2,9 @@ use std::fmt::{Display, Error, Formatter};
 
 use chrono::{Date, Datelike, Duration, LocalResult, TimeZone, Utc};
 
-/// This constant represents the shortest number of days that is guaranteed to be
-/// consistent. It is used to smooth periods that span months or years. Both units
-/// contain inconsistent numbers of days, therefore a full 4 year period is required.
+// This constant represents the shortest number of days that is guaranteed to be
+// consistent. It is used to smooth periods that span months or years. Both units contain
+// inconsistent numbers of days, therefore a full 4 year period is required.
 pub(super) const MACRO_PERIOD: u32 = (365.25 * 4.0) as u32;
 
 // These are tedious arrays to aid the lookup of month lengths. Unfortunately the
@@ -12,18 +12,34 @@ pub(super) const MACRO_PERIOD: u32 = (365.25 * 4.0) as u32;
 const MONTH_LENGTHS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 const MONTH_LENGTHS_LEAP: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
-/// Records the recurrence of a transaction
+/// The frequency of a `TransactionModel`.
 #[derive(Debug)]
 pub enum Frequency {
+    /// A single transaction
     Once,
-    Daily(u32),                              // Every n days
-    Weekly(u32, Vec<u32>),                   // Every n weeks on x days (Monday = 1, Sunday = 7)
-    MonthlyDate(u32, Vec<u32>),              // Every n months each date
-    MonthlyDay(u32, u32, FrequencyMonthDay), // Every n months, on the nth (First = 1, Fifth = 5, Last = 0) day
-    // Every n years in x months (January = 1, December = 12) on the nth (First = 1, Fifth = 5, Last = 0) day
+    /// Transactions every `n` days
+    Daily(u32),
+    /// Transactions every `n` weeks, for each `day` in the list:
+    ///
+    /// _`day` = 1 (Monday), 2 (Tuesday), ..., 7 (Sunday)_
+    Weekly(u32, Vec<u32>),
+    /// Transactions every `n` months, for each `date` in the list
+    MonthlyDate(u32, Vec<u32>),
+    /// Transactions every `n` months, on the `nth` day:
+    ///
+    /// _`nth` = 1 (first), 2 (second), ..., 5 (fifth), 0 (last)_
+    MonthlyDay(u32, u32, FrequencyMonthDay),
+    /// Transactions every `n` years, every `x` months:
+    ///
+    /// _`x` = 1 (January), 2 (February), ..., 12 (December)_
+    ///
+    /// on the `nth` day:
+    ///
+    /// _`nth` = 1 (first), 2 (second), ..., 5 (fifth), 0 (last)_
     Yearly(u32, Vec<u32>, Option<u32>, Option<FrequencyMonthDay>),
 }
 
+/// The days that a monthly or yearly `TransactionModel` repeats on.
 #[derive(Debug)]
 pub enum FrequencyMonthDay {
     Monday,
@@ -33,9 +49,12 @@ pub enum FrequencyMonthDay {
     Friday,
     Saturday,
     Sunday,
-    Day,     // The nth day of the month
-    Weekday, // The nth week day (Mon - Fri)
-    Weekend, // The nth weekend day (Sat - Sun)
+    /// The nth day of the month
+    Day,
+    /// The nth week day (Mon - Fri)
+    Weekday,
+    /// The nth weekend day (Sat - Sun)
+    Weekend,
 }
 
 impl Frequency {

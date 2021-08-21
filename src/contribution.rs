@@ -4,7 +4,7 @@ use log::{debug, error, trace};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
-/// The daily amount to contribute to an upcoming payment
+/// The daily amount to contribute to an upcoming payment.
 #[derive(Debug, PartialEq)]
 pub struct Contribution {
     regular: Decimal,
@@ -14,6 +14,7 @@ pub struct Contribution {
     period_length: Duration,
 }
 
+/// Errors encountered whilst working with contributions for a `TransactionModel`.
 #[derive(Error, Debug, Eq, PartialEq)]
 pub enum ContributionError {
     #[error("the start date occurs in the past")]

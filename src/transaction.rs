@@ -22,6 +22,7 @@ pub struct TransactionModel {
     frequency: Frequency,
 }
 
+/// Errors encountered whilst working with [`TransactionModel`]s.
 #[derive(Error, Debug, PartialEq)]
 pub enum TransactionError {
     #[error("could not calculate contributions: {0}")]
@@ -48,12 +49,13 @@ enum ContributionSign<'a> {
 }
 
 impl TransactionModel {
-    /// Create a new `Transaction`.
+    /// Create a new `TransactionModel`.
     ///
     /// This function captures a `calculation_date`, which represents the date that this
-    /// `Transaction` was first calculated. This is important for recreating past
-    /// `Transaction`s accurately, as a `Transaction`'s contributions towards a future
-    /// payment will often begin on the day that the `Transaction` is calculated.
+    /// `TransactionModel` was first calculated. This is important for recreating past
+    /// `TransactionModel`s accurately, as a `TransactionModel`'s contributions
+    /// towards a future payment will often begin on the day that the
+    /// `TransactionModel` is calculated.
     pub fn new(
         value: Decimal,
         frequency: Frequency,
@@ -103,11 +105,11 @@ impl<'a> ContributionSign<'a> {
     }
 }
 
-/// Calculate whether a collection of revenue, expense and savings transactions are
-/// sustainable in perpetuity.
+/// Calculate whether a collection of revenue, expense and savings [`TransactionModel`]s
+/// are sustainable in perpetuity.
 ///
-/// In other words, calculate whether our expense and savings transactions will ever
-/// cause us to lose money over time.
+/// In other words, calculate whether our expense and savings [`TransactionModel`]s will
+/// ever cause us to lose money over time.
 ///
 /// The affordability equation is: `revenue = savings + expenses`.
 ///
