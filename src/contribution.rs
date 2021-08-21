@@ -40,6 +40,7 @@ impl Contribution {
     //     }
     // }
 
+    #[allow(clippy::comparison_chain)]
     pub fn regular_or_last(&self, date: Date<Utc>) -> Option<Decimal> {
         let period_end = self.period_end(Some(date));
         if date >= self.start_date {
