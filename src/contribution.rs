@@ -32,8 +32,8 @@ pub enum ContributionError {
 }
 
 impl Contribution {
-    /// Returns whether this `Contribution` has expired.
-    /// If `end_date` is not set, this `Contribution` will never expire.
+    // Returns whether this `Contribution` has expired.
+    // If `end_date` is not set, this `Contribution` will never expire.
     // pub fn has_expired(&self) -> bool {
     //     match self.end_date {
     //         Some(date) => date < Utc::today(),
@@ -43,7 +43,7 @@ impl Contribution {
 
     #[allow(clippy::comparison_chain)]
     pub fn regular_or_last(&self, date: Date<Utc>) -> Option<Decimal> {
-        let period_end = self.period_end(Some(date));
+        let period_end = self.get_period_end(Some(date));
         if date >= self.start_date {
             if date == period_end {
                 return self.last.or(Some(self.regular));
@@ -54,11 +54,15 @@ impl Contribution {
         None
     }
 
-    pub fn start_date(&self) -> Date<Utc> {
+    pub fn get_start_date(&self) -> Date<Utc> {
         self.start_date
     }
 
-    pub fn period_end(&self, date: Option<Date<Utc>>) -> Date<Utc> {
+    pub fn get_end_date(&self) -> Option<Date<Utc>> {
+        self.end_date
+    }
+
+    pub fn get_period_end(&self, date: Option<Date<Utc>>) -> Date<Utc> {
         let date = date.unwrap_or(self.start_date);
         self.end_date.unwrap_or_else(|| {
             // If there's no end date, roll forward to the next period end for `date`.
@@ -75,12 +79,47 @@ impl Contribution {
             }
         })
     }
+
+    pub fn set_end_date(&mut self, date: Date<Utc>, last_payment: Option<Date<Utc>>) {
+        // If the date is outside the range of this contribution, ignore it
+        if date < self.start_date || (self.end_date.is_some() && Some(date) > self.end_date) {
+            return;
+        }
+
+        // If the end date is less than or equal to the last payment, we will not have a
+        // surplus, so don't perform the surplus calculations.
+        if Some(date) > last_payment {
+            // Redefine `last_payment` so that we always have a date to start counting
+            // the total surplus contributions from.
+            // Note that we increment last_payment if defined, because it represents the last
+            // date of the previous period, not the start of the current one.
+            let last_payment = last_payment.map(|p| p.succ()).unwrap_or(self.start_date);
+
+            // Calculate the total contributions for the date difference, adding 1 to account
+            // for contributions on the start and end days.
+            // Note that we don't take account of any `last` value as this is only used on
+            // the same date as a payment. This would make end = last_payment, which means
+            // we'd return before getting here.
+            let diff = date - last_payment + Duration::days(1);
+            let mut total = Decimal::from(diff.num_days()) * self.regular;
+
+            // Make total negative, as we need to 'pay back' the surplus, rather than
+            // accumulating it.
+            total.set_sign_negative(true);
+
+            // Set last contribution to remainder, so we can track the surplus
+            self.last = Some(total);
+        }
+
+        // Set contribution's new end date
+        self.end_date = Some(date);
+    }
 }
 
-/// Returns a tuple of the regular contribution and any required onboarding amelioration.
-/// For example, if I have a new weekly payment schedule which starts in 3 days, but the
-/// first payment is tomorrow, I need an 'onboarding' amelioration to cover the payments
-/// we haven't been saving for.
+// Returns a tuple of the regular contribution and any required onboarding amelioration.
+// For example, if I have a new weekly payment schedule which starts in 3 days, but the
+// first payment is tomorrow, I need an 'onboarding' amelioration to cover the payments
+// we haven't been saving for.
 pub(super) fn calculate(
     value: Decimal,
     frequency: &Frequency,
@@ -102,11 +141,26 @@ pub(super) fn calculate(
     // is no end date; if our periods are not even, we will accumulate a surplus when we
     // actually need to break even.
     if let Frequency::Once = frequency {
+        debug!(
+            "adjusting date range to make use of lead time - start: {} => {}, end: {:?} => {}",
+            start_date, now, end_date, start_date
+        );
+
         end_date = Some(start_date);
         start_date = now;
-    } else if let Some(end) = end_date.as_mut() {
+    } else if end_date.is_some() {
+        debug!(
+            "adjusting start date to make use of lead time: {} => {}",
+            start_date, now
+        );
         start_date = now;
-        *end = *payments.last().unwrap();
+
+        let last_pay = payments.last().map(|d| *d);
+        debug!(
+            "adjusting fixed end date to last payment date: {:?} => {:?}",
+            end_date, last_pay
+        );
+        end_date = last_pay;
     }
 
     let mut contributions = Vec::new();
@@ -143,19 +197,19 @@ pub(super) fn calculate(
     Ok(contributions)
 }
 
-/// Adjust the start and end dates to appropriate values for the given `Frequency`.
-///
-/// In order to make the period even, we may have to shift the start date forward.
-/// For example, say we have payments of $1 with a 3 day frequency. Thus we have
-/// payments on the first day and the fourth day, and our daily contribution is
-/// $0.50. If our start date lands on day 1, we will have only contributed $0.50
-/// towards that expense, where we need $1. Therefore, we need to shift our start
-/// date to day 2 in order that we can balance our contributions and payments.
-///
-/// We may also need to adjust the end date where that end date falls after the last
-/// payment. Otherwise when calculating daily contributions, we would include days
-/// that don't contribute to any payment, resulting in a shortfall on the last n
-/// payments.
+// Adjust the start and end dates to appropriate values for the given `Frequency`.
+//
+// In order to make the period even, we may have to shift the start date forward.
+// For example, say we have payments of $1 with a 3 day frequency. Thus we have
+// payments on the first day and the fourth day, and our daily contribution is
+// $0.50. If our start date lands on day 1, we will have only contributed $0.50
+// towards that expense, where we need $1. Therefore, we need to shift our start
+// date to day 2 in order that we can balance our contributions and payments.
+//
+// We may also need to adjust the end date where that end date falls after the last
+// payment. Otherwise when calculating daily contributions, we would include days
+// that don't contribute to any payment, resulting in a shortfall on the last n
+// payments.
 fn naive_contribution(
     payment: Decimal,
     frequency: &Frequency,
@@ -614,7 +668,7 @@ mod tests {
             end_date: None,
             period_length: Duration::days(2),
         };
-        assert_eq!(c.period_end(None), Utc.ymd(2000, 4, 2));
+        assert_eq!(c.get_period_end(None), Utc.ymd(2000, 4, 2));
     }
 
     #[test]
@@ -626,7 +680,10 @@ mod tests {
             end_date: Some(Utc.ymd(2000, 4, 2)),
             period_length: Duration::days(2),
         };
-        assert_eq!(c.period_end(Some(Utc.ymd(2000, 4, 2))), Utc.ymd(2000, 4, 2));
+        assert_eq!(
+            c.get_period_end(Some(Utc.ymd(2000, 4, 2))),
+            Utc.ymd(2000, 4, 2)
+        );
     }
 
     #[test]
@@ -638,7 +695,66 @@ mod tests {
             end_date: None,
             period_length: Duration::days(2),
         };
-        assert_eq!(c.period_end(Some(Utc.ymd(2000, 4, 7))), Utc.ymd(2000, 4, 8));
+        assert_eq!(
+            c.get_period_end(Some(Utc.ymd(2000, 4, 7))),
+            Utc.ymd(2000, 4, 8)
+        );
+    }
+
+    #[test]
+    fn contribution_set_end_date() {
+        let mut c = Contribution {
+            regular: dec!(1),
+            last: Some(dec!(1.5)),
+            start_date: Utc.ymd(2000, 4, 1),
+            end_date: None,
+            period_length: Duration::days(7),
+        };
+        let end = Utc.ymd(2000, 4, 9);
+        c.set_end_date(end, Some(Utc.ymd(2000, 4, 7)));
+        assert_eq!(c.end_date, Some(end));
+        assert_eq!(c.last, Some(dec!(-2)));
+    }
+
+    #[test]
+    fn contribution_set_end_date_skip() {
+        let end = Some(Utc.ymd(2000, 5, 1));
+        let mut c = Contribution {
+            regular: dec!(1),
+            last: Some(dec!(1.5)),
+            start_date: Utc.ymd(2000, 4, 1),
+            end_date: end,
+            period_length: Duration::days(7),
+        };
+
+        // End date less than start date
+        c.set_end_date(Utc.ymd(2000, 3, 31), None);
+        assert_eq!(c.end_date, end);
+
+        // End date greater than end date
+        c.set_end_date(Utc.ymd(2000, 5, 31), None);
+        assert_eq!(c.end_date, end);
+
+        // End date equals last payment date
+        let new_end = Utc.ymd(2000, 4, 15);
+        c.set_end_date(new_end, Some(new_end));
+        assert_eq!(c.end_date, Some(new_end));
+        assert_eq!(c.last, Some(dec!(1.5)));
+    }
+
+    #[test]
+    fn contribution_set_end_date_no_last_payment() {
+        let mut c = Contribution {
+            regular: dec!(1),
+            last: Some(dec!(1.5)),
+            start_date: Utc.ymd(2000, 4, 1),
+            end_date: None,
+            period_length: Duration::days(7),
+        };
+        let end = Utc.ymd(2000, 4, 3);
+        c.set_end_date(end, None);
+        assert_eq!(c.end_date, Some(end));
+        assert_eq!(c.last, Some(dec!(-3)));
     }
 
     #[test]

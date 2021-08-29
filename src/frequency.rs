@@ -13,7 +13,7 @@ const MONTH_LENGTHS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
 const MONTH_LENGTHS_LEAP: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 /// The frequency of a `TransactionModel`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Frequency {
     /// A single transaction
     Once,
@@ -40,7 +40,7 @@ pub enum Frequency {
 }
 
 /// The days that a monthly or yearly `TransactionModel` repeats on.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum FrequencyMonthDay {
     Monday,
     Tuesday,
